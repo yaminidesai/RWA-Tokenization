@@ -1,0 +1,161 @@
+module RWA.Types where
+
+-- ============================================================
+-- Status Enumerations
+-- ============================================================
+
+-- KYC/AML status for investor onboarding
+data KYCStatus
+  = KYCPending
+  | KYCApproved
+  | KYCRejected
+  | KYCRevoked
+  | KYCExpired
+  deriving (Show, Eq, Ord)
+
+-- Status progression of an escrow purchase / issuance request
+data RequestStatus
+  = Requested
+  | UnderReview
+  | Approved
+  | Rejected
+  | Cancelled
+  | Settled
+  deriving (Show, Eq, Ord)
+
+-- Transfer proposal status
+data TransferStatus
+  = TransferProposed
+  | TransferApproved
+  | TransferRejected
+  | TransferSettled
+  | TransferCancelled
+  deriving (Show, Eq, Ord)
+
+-- Redemption status
+data RedemptionStatus
+  = RedemptionRequested
+  | RedemptionApproved
+  | RedemptionRejected
+  | RedemptionSettled
+  deriving (Show, Eq, Ord)
+
+-- ============================================================
+-- Asset Classification
+-- ============================================================
+
+-- Supported asset classes
+data AssetClass
+  = USTreasury
+  | GovernmentBond
+  | CorporateBond
+  | MunicipalBond
+  deriving (Show, Eq, Ord)
+
+-- Specific US Treasury instrument types
+data TreasuryType
+  = TBill        -- Maturity <= 1 year, zero coupon
+  | TNote        -- Maturity 2-10 years, semiannual coupon
+  | TBond        -- Maturity 20-30 years, semiannual coupon
+  | TIPS         -- Inflation-protected, semiannual coupon
+  | FRN          -- Floating rate note, quarterly coupon
+  deriving (Show, Eq, Ord)
+
+-- Coupon payment frequency
+data CouponFrequency
+  = Semiannual
+  | Annual
+  | Quarterly
+  | Monthly
+  | ZeroCoupon
+  deriving (Show, Eq, Ord)
+
+-- ============================================================
+-- Compliance Types
+-- ============================================================
+
+-- Securities regulation exemption under which the token is issued
+data RegExemption
+  = RegD506b     -- Accredited investors only, no general solicitation
+  | RegD506c     -- Accredited investors only, general solicitation allowed
+  | RegS         -- Offshore transactions
+  | Rule144A     -- Qualified institutional buyers (QIBs)
+  | NoExemption  -- Fully registered or government securities exempt
+  deriving (Show, Eq, Ord)
+
+-- Investor accreditation level
+data AccreditationLevel
+  = Retail
+  | Accredited
+  | QualifiedPurchaser
+  | QualifiedInstitutionalBuyer
+  deriving (Show, Eq, Ord)
+
+-- Transfer restriction type
+data RestrictionType
+  = HoldingPeriod          -- Must hold for N days (e.g., Reg D 6-month)
+  | MaxHoldingLimit        -- Maximum units a single investor can hold
+  | AccreditedOnly         -- Only accredited investors
+  | QIBOnly               -- Only qualified institutional buyers
+  | JurisdictionBlock      -- Blocked jurisdictions (e.g., OFAC sanctioned)
+  | BlackoutPeriod         -- No transfers during certain dates
+  deriving (Show, Eq, Ord)
+
+-- ============================================================
+-- Financial Types
+-- ============================================================
+
+-- Monetary amount with ISO 4217 currency code
+data MonetaryAmount = MonetaryAmount
+  with
+    amount   : Decimal
+    currency : Text     -- ISO 4217 (e.g. "USD")
+  deriving (Show, Eq, Ord)
+
+-- Immutable on-chain metadata for a bond/treasury asset
+data BondMetadata = BondMetadata
+  with
+    cusip         : Text            -- 9-character CUSIP (e.g. "912828YV6")
+    isin          : Text            -- 12-character ISIN (e.g. "US912828YV65")
+    issuerName    : Text            -- e.g. "US Department of the Treasury"
+    assetClass    : AssetClass
+    treasuryType  : Optional TreasuryType
+    faceValue     : Decimal         -- face value per unit (e.g. 1000.0 USD)
+    couponRate    : Decimal         -- annual rate as decimal (e.g. 0.045 = 4.5%)
+    couponFreq    : CouponFrequency
+    maturityDate  : Date
+    issuanceDate  : Date
+    regExemption  : RegExemption
+  deriving (Show, Eq)
+
+-- ============================================================
+-- Oracle Types
+-- ============================================================
+
+-- Type of oracle data feed
+data OracleDataType
+  = PriceFeed         -- Market price / NAV
+  | YieldFeed         -- Current yield
+  | ReferenceRate     -- e.g. SOFR, Fed Funds Rate
+  | CorporateAction   -- Coupon announcement, maturity, call
+  deriving (Show, Eq, Ord)
+
+-- ============================================================
+-- Off-chain Integration Reference Types
+-- ============================================================
+
+-- Settlement method for fiat leg
+data SettlementMethod
+  = Fedwire
+  | ACH
+  | SWIFTgpi
+  | InternalBookTransfer
+  deriving (Show, Eq, Ord)
+
+-- Off-chain reference IDs attached to on-ledger contracts
+data SettlementRef = SettlementRef
+  with
+    method        : SettlementMethod
+    referenceId   : Text              -- e.g. Fedwire IMAD, ACH trace number
+    timestamp     : Time
+  deriving (Show, Eq)

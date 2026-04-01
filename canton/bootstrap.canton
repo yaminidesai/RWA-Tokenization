@@ -1,0 +1,142 @@
+// =================================================================
+// RWA Treasury Bond Tokenization Platform
+// Canton Bootstrap Script
+// =================================================================
+//
+// Usage (dev / sandbox):
+//   canton run --config canton/config/bank-participant.conf \
+//              --bootstrap canton/bootstrap.canton
+//
+// Usage (production — connecting to Canton Global Synchronizer):
+//   Set CANTON_GLOBAL_SYNC_URL to the Global Synchronizer sequencer URL
+//   provided by the Canton Network (e.g. https://sequencer.canton.global)
+//   then run canton as above.
+//
+// This script:
+//   1. Connects the bank participant to the Canton Global Synchronizer
+//   2. Allocates the escrowBank party
+//   3. Uploads and vets the Daml packages (DAR)
+//   4. Allocates sample investor parties (dev/test only)
+//   5. Verifies health
+//
+// Node reference:
+//   bank  →  bank participant node (from HOCON config key "bank")
+//
+// There is NO local synchronizer. The Canton Global Synchronizer is
+// operated by the super-validator consortium and the bank connects to it
+// as a participant. Bond issuers, treasury providers, and regulators are
+// NOT Canton participants — they are off-chain integration targets.
+// =================================================================
+
+
+// -----------------------------------------------------------------
+// Step 1: Connect bank participant to the Canton Global Synchronizer
+// -----------------------------------------------------------------
+//
+// The Global Synchronizer URL is provided by the Canton Network.
+// For dev/sandbox, use the Canton sandbox domain instead.
+
+val globalSyncUrl = sys.env.getOrElse(
+  "CANTON_GLOBAL_SYNC_URL",
+  "http://localhost:18181"   // default: local Canton sandbox sequencer
+)
+
+logger.info(s"[1/4] Connecting bank participant to synchronizer: $globalSyncUrl")
+
+bank.domains.connect(
+  "global-sync",
+  globalSyncUrl
+)
+
+val connected = bank.domains.list_connected()
+  .exists(_.domainAlias.unwrap == "global-sync")
+
+assert(connected, s"FATAL: Bank participant failed to connect to synchronizer at $globalSyncUrl")
+logger.info("[1/4] Bank participant connected to Canton Global Synchronizer.")
+
+
+// -----------------------------------------------------------------
+// Step 2: Allocate platform parties on the bank's participant node
+// -----------------------------------------------------------------
+//
+// ALL parties are hosted on the bank's single participant node.
+//
+// In production:
+//   - escrowBank party is allocated once during platform setup
+//   - Investor parties are allocated on-demand by the KYC/Onboarding
+//     Service via the Admin API after identity verification completes
+//   - The party ID is stored in the investor's profile and embedded
+//     in JWT tokens (actAs claim) issued by the Auth Service
+
+val escrowBankParty = bank.parties.enable("EscrowBank")
+logger.info(s"[2/4] escrowBank party allocated: $escrowBankParty")
+
+
+// -----------------------------------------------------------------
+// Step 3: Upload and vet the Daml packages (DAR)
+// -----------------------------------------------------------------
+
+val darPath = sys.env.getOrElse(
+  "CANTON_DAR_PATH",
+  ".daml/dist/rwa-tokenization-0.0.1.dar"
+)
+
+logger.info(s"[3/4] Uploading DAR from: $darPath")
+bank.dars.upload(darPath)
+
+// Vetting authorises the bank's participant to execute transactions
+// using these Daml templates on the Global Synchronizer
+bank.packages.vet()
+logger.info("[3/4] DAR uploaded and packages vetted.")
+
+
+// -----------------------------------------------------------------
+// Step 4: Allocate sample investor parties (DEV / TEST ONLY)
+// -----------------------------------------------------------------
+//
+// Remove this block in production. Investor parties are allocated
+// dynamically by the KYC Service after successful identity verification.
+
+val devInvestors = Seq(
+  "InvestorAlice",
+  "InvestorBobInstitutional",
+  "InvestorCharlie"
+)
+
+val investorParties = devInvestors.map { name =>
+  // All investor parties live on the bank's participant node.
+  // Investors access the ledger via the bank's Ledger API (port 6865)
+  // using JWTs scoped to their individual party ID.
+  val party = bank.parties.enable(name)
+  logger.info(s"[4/4] Investor party allocated: $name -> $party")
+  (name, party)
+}
+
+
+// -----------------------------------------------------------------
+// Summary
+// -----------------------------------------------------------------
+
+logger.info("=======================================================")
+logger.info("  RWA Tokenization Platform — Bootstrap Complete")
+logger.info("=======================================================")
+logger.info(s"  Synchronizer:      Canton Global Synchronizer")
+logger.info(s"  Sync URL:          $globalSyncUrl")
+logger.info(s"  Bank participant:  ${bank.id}")
+logger.info(s"  escrowBank party:  $escrowBankParty")
+logger.info("  Investor parties:")
+investorParties.foreach { case (name, party) =>
+  logger.info(s"    $name  ->  $party")
+}
+logger.info("-------------------------------------------------------")
+logger.info("  External integrations (off-chain, not Canton nodes):")
+logger.info("    Bond Issuers:      DTC / TreasuryDirect (SWIFT/FIX)")
+logger.info("    Treasury Dealers:  Primary dealers (SWIFT MT5xx)")
+logger.info("    Regulators:        SEC/OCC (off-chain reports)")
+logger.info("    KYC Provider:      Jumio / Onfido (REST API)")
+logger.info("    Market Data:       Bloomberg / Refinitiv")
+logger.info("=======================================================")
+
+assert(bank.health.running(), "FATAL: Bank participant is not healthy after bootstrap")
+logger.info("  Health check: OK")
+logger.info("=======================================================")

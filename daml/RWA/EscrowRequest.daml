@@ -1,0 +1,144 @@
+module RWA.EscrowRequest where
+
+import RWA.Types
+
+-- ============================================================
+-- Escrow Request — Investor Purchase Request Workflow
+-- ============================================================
+--
+-- Party model:
+--   escrowBank — signatory (authorises and processes the request)
+--   investor   — signatory (expresses and owns the purchase intent)
+--
+-- No regulator party. Regulatory audit trail is generated off-chain by
+-- the bank's Reporting Service from ledger event streams.
+--
+-- Lifecycle:
+--   1. Investor submits purchase request via the Investor Portal
+--   2. Bank's API Gateway co-signs and creates EscrowRequest on-ledger
+--   3. Bank verifies investor KYC off-chain (lookupByKey on InvestorKYC)
+--   4. Bank exercises ApproveRequest → ApprovedPurchase
+--      OR RejectRequest → RejectedRequest
+--   5. Bank's Custody Service detects ApprovedPurchase via ledger stream,
+--      purchases the underlying bond via primary dealer (SWIFT MT541 → DTC)
+--   6. After DTC settlement confirmation (MT545), Minting Service composes
+--      a single DAML transaction:
+--        a. Exercise ConfirmCustodyAndMint on ApprovedPurchase (archives it)
+--        b. Exercise RecordMinting on CustodyRecord (updates minted count)
+--        c. Create TokenizedBond (investor sees their token)
+
+template EscrowRequest
+  with
+    investor           : Party
+    escrowBank         : Party
+    metadata           : BondMetadata
+    requestedUnits     : Decimal
+    maxPurchasePrice   : MonetaryAmount  -- investor's stated price ceiling
+    requestDate        : Date
+    investorAccountRef : Text            -- investor's bank account for fiat leg
+    notes              : Text
+  where
+    signatory escrowBank, investor
+
+    ensure requestedUnits > 0.0
+        && maxPurchasePrice.amount > 0.0
+        && investorAccountRef /= ""
+
+    -- Bank approves after verifying KYC, accreditation, and bond availability
+    choice ApproveRequest : ContractId ApprovedPurchase
+      controller escrowBank
+      do
+        create ApprovedPurchase with
+          investor
+          escrowBank
+          metadata
+          approvedUnits    = requestedUnits
+          approvedMaxPrice = maxPurchasePrice
+          approvalDate     = requestDate
+          investorAccountRef
+
+    -- Bank rejects with a reason visible to the investor
+    choice RejectRequest : ContractId RejectedRequest
+      with
+        rejectionReason : Text
+      controller escrowBank
+      do
+        assertMsg "Rejection reason required" (rejectionReason /= "")
+        create RejectedRequest with
+          investor
+          escrowBank
+          metadata
+          requestedUnits
+          rejectionReason
+          rejectionDate = requestDate
+
+    -- Investor cancels their own pending request
+    choice CancelRequest : ()
+      controller investor
+      do pure ()
+
+
+-- Intermediate state: bank approved, awaiting off-chain DTC settlement.
+-- The bank's Custody Service streams the ledger for ApprovedPurchase events
+-- and initiates the bond purchase (SWIFT MT541 to primary dealer / DTC).
+template ApprovedPurchase
+  with
+    investor           : Party
+    escrowBank         : Party
+    metadata           : BondMetadata
+    approvedUnits      : Decimal
+    approvedMaxPrice   : MonetaryAmount
+    approvalDate       : Date
+    investorAccountRef : Text
+  where
+    signatory escrowBank, investor
+
+    ensure approvedUnits > 0.0
+        && approvedMaxPrice.amount > 0.0
+
+    -- Bank exercises this after DTC settlement confirmation arrives (MT545).
+    -- The Minting Service composes this choice in the same DAML transaction
+    -- with CustodyRecord.RecordMinting and TokenizedBond creation, guaranteeing
+    -- the 1:1 backing invariant atomically.
+    choice ConfirmCustodyAndMint : ()
+      with
+        dtcSettlementRef : Text
+        actualPrice      : MonetaryAmount
+      controller escrowBank
+      do
+        assertMsg "Settlement reference required" (dtcSettlementRef /= "")
+        assertMsg "Actual price must not exceed investor's maximum" (actualPrice.amount <= approvedMaxPrice.amount)
+        -- Archives ApprovedPurchase. Caller composes with RecordMinting
+        -- and TokenizedBond creation in the same transaction.
+        pure ()
+
+    -- Bank cancels if custody acquisition fails (bond unavailable, DTC rejection)
+    choice CancelApprovedPurchase : ContractId RejectedRequest
+      with
+        cancellationReason : Text
+      controller escrowBank
+      do
+        assertMsg "Cancellation reason required" (cancellationReason /= "")
+        create RejectedRequest with
+          investor
+          escrowBank
+          metadata
+          requestedUnits  = approvedUnits
+          rejectionReason = cancellationReason
+          rejectionDate   = approvalDate
+
+
+-- Immutable audit record of a rejected or cancelled request.
+template RejectedRequest
+  with
+    investor        : Party
+    escrowBank      : Party
+    metadata        : BondMetadata
+    requestedUnits  : Decimal
+    rejectionReason : Text
+    rejectionDate   : Date
+  where
+    signatory escrowBank, investor
+
+    ensure requestedUnits > 0.0
+        && rejectionReason /= ""

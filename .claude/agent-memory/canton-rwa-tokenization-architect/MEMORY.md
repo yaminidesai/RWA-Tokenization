@@ -1,0 +1,2 @@
+- [project_documentation_structure.md](./project_documentation_structure.md) — RWA tokenization platform documentation suite: 6 docs covering bank setup, regulatory requirements, developer requirements, architecture, and pros/cons analysis
+- [feedback_no_external_canton_participants.md](./feedback_no_external_canton_participants.md) — Critical: Bond Issuer and Treasury Provider are NOT Canton participants. Bank is the sole operational Canton actor. Only 3 party types: escrowBank, investor, regulator.

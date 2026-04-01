@@ -1,0 +1,125 @@
+module RWA.KYC where
+
+import RWA.Types
+
+-- ============================================================
+-- KYC Registry — Investor Whitelisting and Compliance Status
+-- ============================================================
+--
+-- Party model:
+--   escrowBank  — sole signatory; owns the KYC determination
+--   investor    — observer; can read their own KYC status
+--
+-- The regulator is NOT a Canton party. Regulatory audit access is
+-- provided off-chain by the bank's Reporting Service (exports ledger
+-- data to SEC/OCC in required formats).
+--
+-- All investor parties are allocated on the bank's single participant
+-- node. There is no separate participant node for regulators or investors.
+
+-- KYC/AML compliance certificate issued and maintained by the bank.
+-- Required before any issuance request can be submitted or transfer accepted.
+-- Contract key allows deterministic lookup by (escrowBank, investor) pair.
+template InvestorKYC
+  with
+    investor          : Party
+    escrowBank        : Party
+    fullName          : Text
+    jurisdiction      : Text           -- ISO 3166-1 alpha-2 country code
+    accreditation     : AccreditationLevel
+    isAccredited      : Bool           -- SEC accredited investor status
+    amlCleared        : Bool           -- Bank Secrecy Act / AML clearance
+    sanctionsCleared  : Bool           -- OFAC sanctions screening passed
+    status            : KYCStatus
+    approvalDate      : Date
+    expiryDate        : Date
+    kycProviderRef    : Text           -- reference to off-chain KYC provider record (Jumio/Onfido)
+    lastScreeningDate : Date           -- last OFAC / AML re-screening date
+  where
+    signatory escrowBank
+    observer investor
+
+    -- Note: contract keys are not supported in LF 2.1 target.
+    -- Off-chain services (KYC Service, Transfer Service) look up InvestorKYC
+    -- by contract ID stored in their own PostgreSQL databases, populated
+    -- from ledger event streams.
+
+    ensure amlCleared
+        && sanctionsCleared
+        && approvalDate <= expiryDate
+        && fullName /= ""
+        && jurisdiction /= ""
+        && kycProviderRef /= ""
+
+    -- Bank approves KYC after off-chain identity verification completes
+    choice ApproveKYC : ContractId InvestorKYC
+      controller escrowBank
+      do
+        assertMsg "Can only approve a Pending KYC" (status == KYCPending)
+        create this with status = KYCApproved
+
+    -- Bank revokes KYC (e.g., failed re-screening, suspicious activity)
+    -- Archiving the contract signals revocation; off-chain services detect
+    -- the archive event and suspend the investor's platform access.
+    choice RevokeKYC : ()
+      controller escrowBank
+      do
+        assertMsg "Can only revoke an Approved KYC" (status == KYCApproved)
+        pure ()
+
+    -- Bank renews KYC before expiry with updated screening dates
+    choice RenewKYC : ContractId InvestorKYC
+      with
+        newExpiry         : Date
+        newScreeningDate  : Date
+      controller escrowBank
+      do
+        assertMsg "New expiry must be after current expiry" (newExpiry > expiryDate)
+        create this with
+          expiryDate        = newExpiry
+          lastScreeningDate = newScreeningDate
+          status            = KYCApproved
+
+    -- Bank updates accreditation level (e.g., investor gains QIB status)
+    choice UpdateAccreditation : ContractId InvestorKYC
+      with
+        newAccreditation : AccreditationLevel
+        newIsAccredited  : Bool
+      controller escrowBank
+      do
+        create this with
+          accreditation = newAccreditation
+          isAccredited  = newIsAccredited
+
+
+-- ============================================================
+-- KYC Invitation — Bank Initiates Investor Onboarding
+-- ============================================================
+--
+-- The bank creates a KYCInvitation after the investor registers on
+-- the Investor Portal. The investor's party has already been allocated
+-- on the bank's participant node by the onboarding service via Admin API.
+-- The investor accepts the invitation, triggering the off-chain KYC
+-- verification flow (Jumio/Onfido identity check + OFAC screening).
+-- After verification, the bank's KYC Service creates the InvestorKYC record.
+
+template KYCInvitation
+  with
+    investor    : Party
+    escrowBank  : Party
+    invitedDate : Date
+  where
+    signatory escrowBank
+    observer investor
+
+    -- Investor acknowledges the invitation; the off-chain KYC Service
+    -- watches for AcceptKYCInvitation events on the ledger stream and
+    -- initiates the Jumio/Onfido identity verification flow.
+    choice AcceptKYCInvitation : ()
+      controller investor
+      do pure ()
+
+    -- Bank withdraws the invitation (e.g., investor registered in error)
+    choice WithdrawKYCInvitation : ()
+      controller escrowBank
+      do pure ()

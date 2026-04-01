@@ -1,0 +1,104 @@
+module RWA.AssetCustody where
+
+import RWA.Types
+
+-- ============================================================
+-- Custody Record — Bank's On-Ledger Attestation of DTC Holdings
+-- ============================================================
+--
+-- The bank holds real Treasury securities in its DTC participant account,
+-- established through normal banking relationships with the US Treasury
+-- (via TreasuryDirect / auction) and primary dealers.
+--
+-- Bond issuers (US Treasury) and primary dealers are NOT Canton parties.
+-- They operate entirely on external infrastructure (DTC, Fedwire, SWIFT)
+-- and have no visibility into or participation in the Canton ledger.
+--
+-- The bank is both the operator AND the custodian. After purchasing bonds
+-- off-chain and receiving DTC settlement confirmation (SWIFT MT545), the
+-- bank's Custody Service creates this on-ledger record as self-attestation:
+-- "I hold X units of CUSIP Y in my DTC account, confirmed by reference Z."
+--
+-- The 1:1 token-to-bond backing invariant is enforced on-chain:
+--   ensure totalMintedUnits <= quantity
+-- and maintained by composing RecordMinting / RecordRedemption atomically
+-- with TokenizedBond creation / archival in the same DAML transaction.
+--
+-- Party model:
+--   escrowBank — sole signatory (no external custodian party exists)
+--   No observer — regulatory audit is handled entirely off-chain
+--     (Reconciliation Service exports DTC position vs. on-ledger supply
+--      to SEC/OCC reporting systems on a daily schedule)
+
+template CustodyRecord
+  with
+    escrowBank        : Party
+    metadata          : BondMetadata
+    quantity          : Decimal          -- units held in bank's DTC account
+    purchaseDate      : Date
+    purchasePrice     : MonetaryAmount   -- total cost of the position
+    dtcSettlementRef  : Text             -- DTC settlement confirmation ref (MT545)
+    dealerReference   : Text             -- primary dealer trade confirmation ID
+    fedwireImad       : Optional Text    -- Fedwire Securities IMAD (DVP settlement)
+    totalMintedUnits  : Decimal          -- token units minted against this position
+    isFullyRedeemed   : Bool
+  where
+    signatory escrowBank
+
+    -- Note: contract keys are not supported in LF 2.1 target.
+    -- Off-chain services track CustodyRecord contract IDs per CUSIP
+    -- in their own PostgreSQL databases, populated from ledger event streams.
+
+    ensure quantity >= 0.0
+        && purchasePrice.amount > 0.0
+        && totalMintedUnits <= quantity  -- 1:1 backing invariant
+        && metadata.cusip /= ""
+        && dtcSettlementRef /= ""
+
+    -- Records tokens minted against this custody position.
+    -- Called atomically with TokenizedBond creation in the minting transaction.
+    choice RecordMinting : ContractId CustodyRecord
+      with
+        mintedUnits : Decimal
+      controller escrowBank
+      do
+        assertMsg "Minted units must be positive" (mintedUnits > 0.0)
+        let newTotal = totalMintedUnits + mintedUnits
+        assertMsg "Cannot mint more tokens than custody quantity" (newTotal <= quantity)
+        create this with totalMintedUnits = newTotal
+
+    -- Records redemption of underlying security.
+    -- Called atomically with BurnToken on the TokenizedBond.
+    choice RecordRedemption : ContractId CustodyRecord
+      with
+        redeemedUnits  : Decimal
+        redemptionRef  : Text            -- DTC maturity / Fedwire reference
+      controller escrowBank
+      do
+        assertMsg "Redeemed units must be positive" (redeemedUnits > 0.0)
+        assertMsg "Cannot redeem more than minted" (redeemedUnits <= totalMintedUnits)
+        let newQuantity = quantity - redeemedUnits
+        let newMinted   = totalMintedUnits - redeemedUnits
+        create this with
+          quantity         = newQuantity
+          totalMintedUnits = newMinted
+          isFullyRedeemed  = (newQuantity == 0.0)
+
+    -- Adds units to an existing custody position for the same CUSIP
+    -- (e.g., bank buys additional bonds to satisfy new investor requests)
+    choice IncreaseCustodyPosition : ContractId CustodyRecord
+      with
+        additionalQuantity : Decimal
+        additionalCost     : MonetaryAmount
+        newSettlementRef   : Text
+      controller escrowBank
+      do
+        assertMsg "Additional quantity must be positive" (additionalQuantity > 0.0)
+        assertMsg "Currency must match existing position" (additionalCost.currency == purchasePrice.currency)
+        create this with
+          quantity     = quantity + additionalQuantity
+          purchasePrice = MonetaryAmount with
+            amount   = purchasePrice.amount + additionalCost.amount
+            currency = purchasePrice.currency
+          dtcSettlementRef = newSettlementRef
+          isFullyRedeemed  = False

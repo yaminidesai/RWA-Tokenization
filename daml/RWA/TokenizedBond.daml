@@ -1,0 +1,201 @@
+module RWA.TokenizedBond where
+
+import RWA.Types
+
+-- ============================================================
+-- Tokenized Bond — The Core On-Chain Token
+-- ============================================================
+--
+-- Represents an investor's ownership of a tokenized US Treasury security.
+-- The bank holds the underlying bond in its DTC account and issues tokens
+-- on a 1:1 basis. One TokenizedBond contract per investor per CUSIP position.
+--
+-- Party model:
+--   escrowBank    — sole signatory (bank is the qualified custodian and
+--                   token issuer; self-attests the backing position)
+--   currentOwner  — observer + co-controller on transfer/redemption choices
+--                   (investor must consent to any transfer of their position)
+--
+-- Trust anchors (how the 1:1 backing is verifiable without a regulator party):
+--   1. CustodyRecord.ensure: totalMintedUnits <= quantity (DAML runtime enforced)
+--   2. dtcSettlementRef links each token to a specific DTC settlement event
+--   3. Bank's Reconciliation Service runs nightly: DTC MT535 position vs on-ledger
+--   4. Regulatory reporting generated off-chain and submitted to SEC/OCC
+
+template TokenizedBond
+  with
+    escrowBank       : Party
+    currentOwner     : Party             -- the investor who holds this token
+    metadata         : BondMetadata
+    units            : Decimal           -- number of bond units owned
+    mintDate         : Date
+    custodyCusip     : Text              -- links to CustodyRecord key (escrowBank, cusip)
+    dtcSettlementRef : Text              -- DTC settlement reference from the mint event
+    transferHistory  : [Text]            -- ordered list of transfer references (audit trail)
+  where
+    signatory escrowBank
+    observer currentOwner
+
+    -- Note: contract keys are not supported in LF 2.1 target.
+    -- Off-chain services track TokenizedBond contract IDs per investor/CUSIP
+    -- in their own PostgreSQL databases, populated from ledger event streams.
+
+    ensure units > 0.0
+        && metadata.cusip /= ""
+        && dtcSettlementRef /= ""
+
+    -- Transfer ownership to another investor.
+    -- Requires BOTH investor consent AND bank authorization.
+    -- Before co-signing, the bank's Transfer Service verifies off-chain:
+    --   1. Recipient has active InvestorKYC (lookupByKey)
+    --   2. Recipient passes OFAC sanctions re-screening
+    --   3. Transfer satisfies holding period (Reg D / Reg S)
+    --   4. Recipient accreditation meets bond requirements
+    choice TransferOwnership : ContractId TokenizedBond
+      with
+        newOwner      : Party
+        transferRef   : Text             -- bank-generated transfer reference
+      controller currentOwner, escrowBank
+      do
+        assertMsg "Cannot transfer to self" (newOwner /= currentOwner)
+        assertMsg "Transfer reference required" (transferRef /= "")
+        create this with
+          currentOwner    = newOwner
+          transferHistory = transferRef :: transferHistory
+
+    -- Split position: transfer a portion to another investor, keep remainder
+    choice SplitTransfer : (ContractId TokenizedBond, ContractId TokenizedBond)
+      with
+        newOwner      : Party
+        transferUnits : Decimal
+        transferRef   : Text
+      controller currentOwner, escrowBank
+      do
+        assertMsg "Cannot transfer to self" (newOwner /= currentOwner)
+        assertMsg "Transfer units must be positive" (transferUnits > 0.0)
+        assertMsg "Cannot transfer more than owned" (transferUnits < units)
+        assertMsg "Transfer reference required" (transferRef /= "")
+
+        remainderCid <- create this with
+          units = units - transferUnits
+
+        transferredCid <- create this with
+          currentOwner    = newOwner
+          units           = transferUnits
+          transferHistory = transferRef :: transferHistory
+
+        return (remainderCid, transferredCid)
+
+    -- Bank records a coupon payment against this token position.
+    -- Called by the Coupon Service after receiving coupon proceeds from DTC
+    -- (corporate action MT564) and distributing to the investor via ACH/Fedwire.
+    nonconsuming choice RecordCouponPayment : ContractId CouponPaymentRecord
+      with
+        couponDate   : Date
+        couponAmount : MonetaryAmount   -- amount paid to this investor
+        paymentRef   : Text             -- ACH trace number or Fedwire IMAD
+      controller escrowBank
+      do
+        assertMsg "Coupon amount must be positive" (couponAmount.amount > 0.0)
+        assertMsg "Payment reference required" (paymentRef /= "")
+        create CouponPaymentRecord with
+          escrowBank
+          investor     = currentOwner
+          metadata
+          units
+          couponDate
+          couponAmount
+          paymentRef
+
+    -- Investor initiates redemption at or after maturity.
+    -- The bank's Redemption Service detects this event and processes
+    -- the DTC maturity / early redemption off-chain, then exercises
+    -- ApproveRedemption + BurnToken in an atomic DAML transaction.
+    choice InitiateRedemption : ContractId RedemptionRequest
+      controller currentOwner
+      do
+        create RedemptionRequest with
+          investor     = currentOwner
+          escrowBank
+          metadata
+          units
+          status       = RedemptionRequested
+
+    -- Bank burns the token after redemption is fully settled off-chain.
+    -- Composed atomically with:
+    --   CustodyRecord.RecordRedemption (in the same DAML transaction)
+    -- This guarantees the custody position is decremented when the token
+    -- is destroyed, maintaining the 1:1 invariant.
+    choice BurnToken : ()
+      controller escrowBank
+      do pure ()
+
+
+-- ============================================================
+-- Coupon Payment Record — Immutable Proof of Coupon Distribution
+-- ============================================================
+--
+-- Created by the bank's Coupon Service after each coupon cycle.
+-- The investor can verify their payment history on-chain.
+-- Off-chain, the bank submits coupon data to EDGAR and FinCEN.
+
+template CouponPaymentRecord
+  with
+    escrowBank   : Party
+    investor     : Party
+    metadata     : BondMetadata
+    units        : Decimal           -- units held at payment date
+    couponDate   : Date
+    couponAmount : MonetaryAmount
+    paymentRef   : Text              -- ACH trace number or Fedwire IMAD
+  where
+    signatory escrowBank
+    observer investor
+
+    ensure couponAmount.amount > 0.0
+        && units > 0.0
+        && paymentRef /= ""
+
+
+-- ============================================================
+-- Redemption Request — Investor Initiates Bond Redemption
+-- ============================================================
+--
+-- Created from TokenizedBond.InitiateRedemption.
+-- The bank's Redemption Service processes DTC maturity/early redemption
+-- off-chain, receives Fedwire principal proceeds, pays the investor via
+-- ACH/Fedwire, then composes ApproveRedemption + BurnToken atomically.
+
+template RedemptionRequest
+  with
+    investor   : Party
+    escrowBank : Party
+    metadata   : BondMetadata
+    units      : Decimal
+    status     : RedemptionStatus
+  where
+    signatory escrowBank, investor
+
+    ensure units > 0.0
+
+    -- Bank approves and settles redemption after off-chain processing.
+    -- Composed atomically with TokenizedBond.BurnToken and
+    -- CustodyRecord.RecordRedemption in the same DAML transaction.
+    choice ApproveRedemption : ()
+      with
+        redemptionAmount : MonetaryAmount  -- principal + accrued interest paid
+        paymentRef       : Text            -- Fedwire IMAD or ACH trace
+      controller escrowBank
+      do
+        assertMsg "Redemption amount must be positive" (redemptionAmount.amount > 0.0)
+        assertMsg "Payment reference required" (paymentRef /= "")
+        pure ()
+
+    -- Bank rejects redemption (bond not yet matured, compliance hold)
+    choice RejectRedemption : ()
+      with
+        rejectionReason : Text
+      controller escrowBank
+      do
+        assertMsg "Rejection reason required" (rejectionReason /= "")
+        pure ()
