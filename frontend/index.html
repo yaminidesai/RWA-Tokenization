@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>RWA Treasury Bonds</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <div id="startup-error" style="display:none;padding:40px;font-family:monospace;background:#fee;color:#900;white-space:pre-wrap;border:2px solid red;margin:20px;border-radius:8px;"></div>
+    <script>
+      window.onerror = function(msg, src, line, col, err) {
+        var el = document.getElementById('startup-error');
+        el.style.display = 'block';
+        el.textContent = 'JS Error: ' + msg + '\nFile: ' + src + ':' + line + ':' + col + '\n' + (err && err.stack ? err.stack : '');
+      };
+      window.addEventListener('unhandledrejection', function(e) {
+        var el = document.getElementById('startup-error');
+        el.style.display = 'block';
+        el.textContent = (el.textContent || '') + '\nUnhandled Promise Rejection: ' + (e.reason && e.reason.stack ? e.reason.stack : e.reason);
+      });
+    </script>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

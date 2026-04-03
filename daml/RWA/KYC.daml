@@ -24,6 +24,7 @@ template InvestorKYC
   with
     investor          : Party
     escrowBank        : Party
+    regulator         : Party           -- regulatory observer for audit and market surveillance
     fullName          : Text
     jurisdiction      : Text           -- ISO 3166-1 alpha-2 country code
     accreditation     : AccreditationLevel
@@ -37,7 +38,7 @@ template InvestorKYC
     lastScreeningDate : Date           -- last OFAC / AML re-screening date
   where
     signatory escrowBank
-    observer investor
+    observer investor, regulator
 
     -- Note: contract keys are not supported in LF 2.1 target.
     -- Off-chain services (KYC Service, Transfer Service) look up InvestorKYC
@@ -107,10 +108,11 @@ template KYCInvitation
   with
     investor    : Party
     escrowBank  : Party
+    regulator   : Party
     invitedDate : Date
   where
     signatory escrowBank
-    observer investor
+    observer investor, regulator
 
     -- Investor acknowledges the invitation; the off-chain KYC Service
     -- watches for AcceptKYCInvitation events on the ledger stream and

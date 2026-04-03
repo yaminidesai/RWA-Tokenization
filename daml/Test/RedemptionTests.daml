@@ -1,0 +1,212 @@
+-- Tests for the redemption lifecycle and coupon payment recording:
+--   full redemption (atomic burn + custody decrement), rejection,
+--   coupon payment records, and guard assertions.
+module Test.RedemptionTests where
+
+import DA.Date
+import Daml.Script
+import RWA.Types
+import RWA.AssetCustody
+import RWA.TokenizedBond
+import Test.Setup
+
+-- ============================================================
+-- Redemption Happy-Path Tests
+-- ============================================================
+
+-- Full redemption flow:
+--   investor initiates -> bank approves and atomically:
+--     * exercises BurnToken on TokenizedBond (archives it)
+--     * exercises RecordRedemption on CustodyRecord (decrements position)
+-- Verifies the 1:1 invariant is maintained: minted units decrease with burned token.
+testFullRedemptionFlow : Script ()
+testFullRedemptionFlow = do
+  TestParties{bank, regulator, investor1} <- allocateTestParties
+  custodyCid <- setupCustodyRecord bank regulator 1000.0
+  (bondCid, custodyCid2) <- mintBond bank regulator investor1 custodyCid 100.0 "DTC-SETTLE-001"
+
+  -- Investor initiates redemption at/after maturity
+  redemptionCid <- submit investor1 do
+    exerciseCmd bondCid InitiateRedemption
+
+  Some req <- queryContractId bank redemptionCid
+  assertMsg "Status should be RedemptionRequested" (req.status == RedemptionRequested)
+
+  -- Three separate submits; in production these are one atomic transaction.
+  submit bank do
+    exerciseCmd redemptionCid ApproveRedemption with
+      redemptionAmount = MonetaryAmount with amount = 100000.0; currency = "USD"
+      paymentRef       = "FEDWIRE-IMAD-001"
+  submit bank do
+    exerciseCmd bondCid BurnToken
+  newCustodyCid <- submit bank do
+    exerciseCmd custodyCid2 RecordRedemption with
+      redeemedUnits = 100.0
+      redemptionRef = "DTC-MATURITY-001"
+
+  -- Token should be burned (archived)
+  burnedBond <- queryContractId bank bondCid
+  assertMsg "TokenizedBond should be archived after burn" (burnedBond == None)
+
+  -- Custody position should be decremented
+  Some custody <- queryContractId bank newCustodyCid
+  assertMsg "Custody quantity should be 900" (custody.quantity == 900.0)
+  assertMsg "Minted units should be 0" (custody.totalMintedUnits == 0.0)
+  assertMsg "isFullyRedeemed should be False (900 units remain)" (not custody.isFullyRedeemed)
+
+-- Full redemption of the entire custody position sets isFullyRedeemed = True
+testFullCustodyRedemptionSetsFlag : Script ()
+testFullCustodyRedemptionSetsFlag = do
+  TestParties{bank, regulator, investor1} <- allocateTestParties
+  custodyCid <- setupCustodyRecord bank regulator 100.0
+  (bondCid, custodyCid2) <- mintBond bank regulator investor1 custodyCid 100.0 "DTC-SETTLE-001"
+
+  redemptionCid <- submit investor1 do
+    exerciseCmd bondCid InitiateRedemption
+
+  submit bank do
+    exerciseCmd redemptionCid ApproveRedemption with
+      redemptionAmount = MonetaryAmount with amount = 100000.0; currency = "USD"
+      paymentRef       = "FEDWIRE-IMAD-001"
+  submit bank do
+    exerciseCmd bondCid BurnToken
+  newCustodyCid2 <- submit bank do
+    exerciseCmd custodyCid2 RecordRedemption with
+      redeemedUnits = 100.0
+      redemptionRef = "DTC-MATURITY-001"
+
+  Some custody <- queryContractId bank newCustodyCid2
+  assertMsg "isFullyRedeemed should be True" (custody.isFullyRedeemed)
+  assertMsg "Quantity should be 0" (custody.quantity == 0.0)
+
+-- Bank rejects a redemption request (e.g. bond not yet matured)
+testRejectRedemption : Script ()
+testRejectRedemption = do
+  TestParties{bank, regulator, investor1} <- allocateTestParties
+  custodyCid <- setupCustodyRecord bank regulator 1000.0
+  (bondCid, _) <- mintBond bank regulator investor1 custodyCid 100.0 "DTC-SETTLE-001"
+
+  redemptionCid <- submit investor1 do
+    exerciseCmd bondCid InitiateRedemption
+
+  submit bank do
+    exerciseCmd redemptionCid RejectRedemption with
+      rejectionReason = "Bond matures 2030-01-15; early redemption not permitted"
+
+  -- Redemption request should be archived after rejection
+  result <- queryContractId bank redemptionCid
+  assertMsg "RedemptionRequest should be archived after rejection" (result == None)
+
+  -- Bond itself should still exist (investor still holds it)
+  Some bond <- queryContractId bank bondCid
+  assertMsg "Bond still held by investor1" (bond.currentOwner == investor1)
+
+-- ============================================================
+-- Coupon Payment Tests
+-- ============================================================
+
+-- Bank records a coupon payment against an investor's bond position.
+-- Verifies the CouponPaymentRecord is created with correct fields.
+testRecordCouponPayment : Script ()
+testRecordCouponPayment = do
+  TestParties{bank, regulator, investor1} <- allocateTestParties
+  custodyCid <- setupCustodyRecord bank regulator 1000.0
+  (bondCid, _) <- mintBond bank regulator investor1 custodyCid 100.0 "DTC-SETTLE-001"
+
+  couponCid <- submit bank do
+    exerciseCmd bondCid RecordCouponPayment with
+      couponDate   = date 2026 Jul 15
+      couponAmount = MonetaryAmount with amount = 2250.0; currency = "USD"  -- 4.5% / 2 * 100 * 1000
+      paymentRef   = "ACH-TRACE-001"
+
+  Some coupon <- queryContractId bank couponCid
+  assertMsg "Coupon investor matches" (coupon.investor == investor1)
+  assertMsg "Coupon amount is correct" (coupon.couponAmount.amount == 2250.0)
+  assertMsg "Payment ref recorded" (coupon.paymentRef == "ACH-TRACE-001")
+  assertMsg "Coupon date is correct" (coupon.couponDate == date 2026 Jul 15)
+
+  -- Bond should NOT be archived (RecordCouponPayment is nonconsuming)
+  Some bond <- queryContractId bank bondCid
+  assertMsg "Bond still exists after coupon payment (nonconsuming)" (bond.currentOwner == investor1)
+
+-- Multiple coupon cycles on the same bond; each creates a separate record.
+testMultipleCouponPayments : Script ()
+testMultipleCouponPayments = do
+  TestParties{bank, regulator, investor1} <- allocateTestParties
+  custodyCid <- setupCustodyRecord bank regulator 1000.0
+  (bondCid, _) <- mintBond bank regulator investor1 custodyCid 100.0 "DTC-SETTLE-001"
+
+  coupon1Cid <- submit bank do
+    exerciseCmd bondCid RecordCouponPayment with
+      couponDate   = date 2026 Jul 15
+      couponAmount = MonetaryAmount with amount = 2250.0; currency = "USD"
+      paymentRef   = "ACH-TRACE-001"
+
+  coupon2Cid <- submit bank do
+    exerciseCmd bondCid RecordCouponPayment with
+      couponDate   = date 2027 Jan 15
+      couponAmount = MonetaryAmount with amount = 2250.0; currency = "USD"
+      paymentRef   = "ACH-TRACE-002"
+
+  Some c1 <- queryContractId bank coupon1Cid
+  Some c2 <- queryContractId bank coupon2Cid
+  assertMsg "First coupon date" (c1.couponDate == date 2026 Jul 15)
+  assertMsg "Second coupon date" (c2.couponDate == date 2027 Jan 15)
+  assertMsg "Payment refs are distinct" (c1.paymentRef /= c2.paymentRef)
+
+-- ============================================================
+-- Failure / Guard Tests
+-- ============================================================
+
+-- Redemption amount must be positive
+testRedemptionZeroAmountFails : Script ()
+testRedemptionZeroAmountFails = do
+  TestParties{bank, regulator, investor1} <- allocateTestParties
+  custodyCid <- setupCustodyRecord bank regulator 1000.0
+  (bondCid, _) <- mintBond bank regulator investor1 custodyCid 100.0 "DTC-SETTLE-001"
+
+  redemptionCid <- submit investor1 do
+    exerciseCmd bondCid InitiateRedemption
+
+  submitMustFail bank do
+    exerciseCmd redemptionCid ApproveRedemption with
+      redemptionAmount = MonetaryAmount with amount = 0.0; currency = "USD"
+      paymentRef       = "FEDWIRE-001"
+
+-- Cannot redeem more units than the position holds in CustodyRecord
+testRedeemMoreThanCustodyFails : Script ()
+testRedeemMoreThanCustodyFails = do
+  TestParties{bank, regulator} <- allocateTestParties
+  custodyCid <- setupCustodyRecord bank regulator 100.0
+
+  submitMustFail bank do
+    exerciseCmd custodyCid RecordRedemption with
+      redeemedUnits = 150.0   -- more than 100 held
+      redemptionRef = "DTC-MATURITY-001"
+
+-- Coupon payment amount must be positive
+testCouponZeroAmountFails : Script ()
+testCouponZeroAmountFails = do
+  TestParties{bank, regulator, investor1} <- allocateTestParties
+  custodyCid <- setupCustodyRecord bank regulator 1000.0
+  (bondCid, _) <- mintBond bank regulator investor1 custodyCid 100.0 "DTC-SETTLE-001"
+
+  submitMustFail bank do
+    exerciseCmd bondCid RecordCouponPayment with
+      couponDate   = date 2026 Jul 15
+      couponAmount = MonetaryAmount with amount = 0.0; currency = "USD"
+      paymentRef   = "ACH-TRACE-001"
+
+-- Rejection reason cannot be empty
+testRejectRedemptionEmptyReasonFails : Script ()
+testRejectRedemptionEmptyReasonFails = do
+  TestParties{bank, regulator, investor1} <- allocateTestParties
+  custodyCid <- setupCustodyRecord bank regulator 1000.0
+  (bondCid, _) <- mintBond bank regulator investor1 custodyCid 100.0 "DTC-SETTLE-001"
+
+  redemptionCid <- submit investor1 do
+    exerciseCmd bondCid InitiateRedemption
+
+  submitMustFail bank do
+    exerciseCmd redemptionCid RejectRedemption with
+      rejectionReason = ""

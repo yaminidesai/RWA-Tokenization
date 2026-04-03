@@ -33,6 +33,7 @@ import RWA.Types
 template CustodyRecord
   with
     escrowBank        : Party
+    regulator         : Party           -- regulatory observer for backing verification
     metadata          : BondMetadata
     quantity          : Decimal          -- units held in bank's DTC account
     purchaseDate      : Date
@@ -44,6 +45,7 @@ template CustodyRecord
     isFullyRedeemed   : Bool
   where
     signatory escrowBank
+    observer regulator
 
     -- Note: contract keys are not supported in LF 2.1 target.
     -- Off-chain services track CustodyRecord contract IDs per CUSIP

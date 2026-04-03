@@ -1,0 +1,136 @@
+-- Tests for Canton ledger privacy and regulator visibility:
+--   * Investor A cannot see Investor B's holdings or KYC records
+--   * Regulator can see ALL holdings, KYC records, and custody positions
+--   * Regulator can verify the 1:1 backing invariant on-chain
+--
+-- These tests exercise Canton's built-in privacy model:
+--   - signatory / observer lists determine exactly who sees each contract
+--   - queryContractId returns None if the querying party has no visibility
+--   - query @Template returns only contracts visible to that party
+module Test.PrivacyTests where
+
+import Daml.Script
+import RWA.KYC
+import RWA.TokenizedBond
+import RWA.AssetCustody
+import Test.Setup
+
+-- ============================================================
+-- Holding Privacy Tests
+-- ============================================================
+
+-- Investor1 cannot see Investor2's TokenizedBond.
+-- Each bond is only visible to escrowBank (signatory) and currentOwner (observer).
+testInvestorCannotSeeOtherHolding : Script ()
+testInvestorCannotSeeOtherHolding = do
+  TestParties{bank, regulator, investor1, investor2} <- allocateTestParties
+  custodyCid <- setupCustodyRecord bank regulator 1000.0
+  (bond1Cid, custodyCid2) <- mintBond bank regulator investor1 custodyCid  100.0 "DTC-SETTLE-001"
+  (bond2Cid, _)           <- mintBond bank regulator investor2 custodyCid2 200.0 "DTC-SETTLE-002"
+
+  -- Investor1 cannot see Investor2's bond (not a signatory or observer)
+  hidden <- queryContractId investor1 bond2Cid
+  assertMsg "Investor1 must NOT see Investor2's TokenizedBond" (hidden == None)
+
+  -- Investor1 can see their own bond
+  visible <- queryContractId investor1 bond1Cid
+  assertMsg "Investor1 must see their own TokenizedBond" (visible /= None)
+
+-- Investor1's query for all bonds returns only their own position, not Investor2's.
+testInvestorQueryReturnsOnlyOwnHoldings : Script ()
+testInvestorQueryReturnsOnlyOwnHoldings = do
+  TestParties{bank, regulator, investor1, investor2} <- allocateTestParties
+  custodyCid <- setupCustodyRecord bank regulator 1000.0
+  (_, custodyCid2) <- mintBond bank regulator investor1 custodyCid  100.0 "DTC-SETTLE-001"
+  _                <- mintBond bank regulator investor2 custodyCid2 200.0 "DTC-SETTLE-002"
+
+  -- Investor1 queries all TokenizedBond contracts visible to them
+  investor1Bonds <- query @TokenizedBond investor1
+  assertMsg "Investor1 sees exactly 1 bond" (length investor1Bonds == 1)
+
+  case investor1Bonds of
+    [(_, bond)] -> assertMsg "That bond belongs to Investor1" (bond.currentOwner == investor1)
+    _           -> assertFail "Expected exactly 1 bond for Investor1"
+
+-- ============================================================
+-- Regulator Visibility Tests
+-- ============================================================
+
+-- Regulator can see ALL TokenizedBond contracts across all investors.
+-- This gives the regulator full market surveillance capability.
+testRegulatorCanSeeAllHoldings : Script ()
+testRegulatorCanSeeAllHoldings = do
+  TestParties{bank, regulator, investor1, investor2} <- allocateTestParties
+  custodyCid <- setupCustodyRecord bank regulator 1000.0
+  (bond1Cid, custodyCid2) <- mintBond bank regulator investor1 custodyCid  100.0 "DTC-SETTLE-001"
+  (bond2Cid, _)           <- mintBond bank regulator investor2 custodyCid2 200.0 "DTC-SETTLE-002"
+
+  -- Regulator can see Investor1's bond
+  r1 <- queryContractId regulator bond1Cid
+  assertMsg "Regulator must see Investor1's bond" (r1 /= None)
+
+  -- Regulator can see Investor2's bond
+  r2 <- queryContractId regulator bond2Cid
+  assertMsg "Regulator must see Investor2's bond" (r2 /= None)
+
+  -- Regulator's full query returns both bonds
+  allBonds <- query @TokenizedBond regulator
+  assertMsg "Regulator sees all 2 bonds on the ledger" (length allBonds == 2)
+
+-- ============================================================
+-- KYC Privacy Tests
+-- ============================================================
+
+-- Investor1 cannot see Investor2's InvestorKYC record.
+-- KYC records are sensitive; each investor only sees their own.
+testInvestorCannotSeeOtherKYC : Script ()
+testInvestorCannotSeeOtherKYC = do
+  TestParties{bank, regulator, investor1, investor2} <- allocateTestParties
+  kyc1Cid <- setupApprovedKYC bank regulator investor1
+  kyc2Cid <- setupApprovedKYC bank regulator investor2
+
+  -- Investor1 cannot see Investor2's KYC
+  hidden <- queryContractId investor1 kyc2Cid
+  assertMsg "Investor1 must NOT see Investor2's KYC record" (hidden == None)
+
+  -- Investor1 can see their own KYC
+  visible <- queryContractId investor1 kyc1Cid
+  assertMsg "Investor1 must see their own KYC record" (visible /= None)
+
+-- Regulator can see ALL InvestorKYC records for compliance oversight.
+testRegulatorCanSeeAllKYC : Script ()
+testRegulatorCanSeeAllKYC = do
+  TestParties{bank, regulator, investor1, investor2} <- allocateTestParties
+  kyc1Cid <- setupApprovedKYC bank regulator investor1
+  kyc2Cid <- setupApprovedKYC bank regulator investor2
+
+  r1 <- queryContractId regulator kyc1Cid
+  assertMsg "Regulator must see Investor1's KYC" (r1 /= None)
+
+  r2 <- queryContractId regulator kyc2Cid
+  assertMsg "Regulator must see Investor2's KYC" (r2 /= None)
+
+  allKYC <- query @InvestorKYC regulator
+  assertMsg "Regulator sees all 2 KYC records" (length allKYC == 2)
+
+-- ============================================================
+-- Custody / Backing Verification Tests
+-- ============================================================
+
+-- Regulator can see the CustodyRecord and verify the 1:1 backing invariant:
+--   totalMintedUnits <= quantity at all times.
+testRegulatorCanVerifyBacking : Script ()
+testRegulatorCanVerifyBacking = do
+  TestParties{bank, regulator, investor1, investor2} <- allocateTestParties
+  custodyCid <- setupCustodyRecord bank regulator 1000.0
+  (_, custodyCid2) <- mintBond bank regulator investor1 custodyCid  300.0 "DTC-SETTLE-001"
+  (_, finalCustodyCid) <- mintBond bank regulator investor2 custodyCid2 400.0 "DTC-SETTLE-002"
+
+  -- Regulator can read the custody record
+  Some custody <- queryContractId regulator finalCustodyCid
+  assertMsg "Regulator sees custody quantity"     (custody.quantity == 1000.0)
+  assertMsg "Regulator sees total minted units"   (custody.totalMintedUnits == 700.0)
+
+  -- Regulator can independently verify the 1:1 backing invariant
+  assertMsg "1:1 backing invariant holds: minted <= quantity"
+    (custody.totalMintedUnits <= custody.quantity)

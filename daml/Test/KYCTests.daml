@@ -1,0 +1,170 @@
+-- Tests for the KYC onboarding lifecycle:
+--   invitation flow, approve, renew, revoke, update accreditation,
+--   and guard assertions (can't approve an already-approved record, etc.)
+module Test.KYCTests where
+
+import DA.Date
+import Daml.Script
+import RWA.Types
+import RWA.KYC
+import Test.Setup
+
+-- ============================================================
+-- Happy-Path Tests
+-- ============================================================
+
+-- Full onboarding: bank creates invitation -> investor accepts ->
+-- bank creates pending KYC -> bank approves.
+testKYCInvitationFlow : Script ()
+testKYCInvitationFlow = do
+  TestParties{bank, regulator, investor1} <- allocateTestParties
+
+  -- Bank creates invitation after investor registers on portal
+  inviteCid <- submit bank do
+    createCmd KYCInvitation with
+      investor    = investor1
+      escrowBank  = bank
+      regulator   = regulator
+      invitedDate = date 2026 Jan 1
+
+  -- Investor accepts; triggers off-chain Jumio/OFAC verification
+  submit investor1 do
+    exerciseCmd inviteCid AcceptKYCInvitation
+
+  -- Bank creates pending KYC once off-chain checks complete
+  pendingCid <- submit bank do
+    createCmd InvestorKYC with
+      investor          = investor1
+      escrowBank        = bank
+      regulator         = regulator
+      fullName          = "Alice Smith"
+      jurisdiction      = "US"
+      accreditation     = Accredited
+      isAccredited      = True
+      amlCleared        = True
+      sanctionsCleared  = True
+      status            = KYCPending
+      approvalDate      = date 2026 Jan 5
+      expiryDate        = date 2027 Jan 5
+      kycProviderRef    = "JUMIO-ALICE-001"
+      lastScreeningDate = date 2026 Jan 5
+
+  -- Bank officer formally approves on-chain
+  approvedCid <- submit bank do
+    exerciseCmd pendingCid ApproveKYC
+
+  Some kyc <- queryContractId bank approvedCid
+  assertMsg "Status should be KYCApproved" (kyc.status == KYCApproved)
+
+-- Bank renews KYC before expiry with extended date and fresh screening
+testKYCRenew : Script ()
+testKYCRenew = do
+  TestParties{bank, regulator, investor1} <- allocateTestParties
+  approvedCid <- setupApprovedKYC bank regulator investor1
+
+  renewedCid <- submit bank do
+    exerciseCmd approvedCid RenewKYC with
+      newExpiry        = date 2028 Jan 1
+      newScreeningDate = date 2026 Dec 1
+
+  Some renewed <- queryContractId bank renewedCid
+  assertMsg "Expiry should be updated" (renewed.expiryDate == date 2028 Jan 1)
+  assertMsg "Screening date should be updated" (renewed.lastScreeningDate == date 2026 Dec 1)
+  assertMsg "Status remains Approved" (renewed.status == KYCApproved)
+
+-- Bank revokes KYC (e.g. failed re-screening); contract is archived
+testKYCRevoke : Script ()
+testKYCRevoke = do
+  TestParties{bank, regulator, investor1} <- allocateTestParties
+  approvedCid <- setupApprovedKYC bank regulator investor1
+
+  submit bank do
+    exerciseCmd approvedCid RevokeKYC
+
+  -- Contract should be archived; investor no longer has active KYC
+  result <- queryContractId bank approvedCid
+  assertMsg "KYC contract should be archived after revocation" (result == None)
+
+-- Bank upgrades investor to QIB accreditation
+testKYCUpdateAccreditation : Script ()
+testKYCUpdateAccreditation = do
+  TestParties{bank, regulator, investor1} <- allocateTestParties
+  approvedCid <- setupApprovedKYC bank regulator investor1
+
+  updatedCid <- submit bank do
+    exerciseCmd approvedCid UpdateAccreditation with
+      newAccreditation = QualifiedInstitutionalBuyer
+      newIsAccredited  = True
+
+  Some updated <- queryContractId bank updatedCid
+  assertMsg "Accreditation should be QIB" (updated.accreditation == QualifiedInstitutionalBuyer)
+
+-- Bank withdraws an invitation before the investor accepts
+testKYCWithdrawInvitation : Script ()
+testKYCWithdrawInvitation = do
+  TestParties{bank, regulator, investor1} <- allocateTestParties
+
+  inviteCid <- submit bank do
+    createCmd KYCInvitation with
+      investor    = investor1
+      escrowBank  = bank
+      regulator   = regulator
+      invitedDate = date 2026 Jan 1
+
+  submit bank do
+    exerciseCmd inviteCid WithdrawKYCInvitation
+
+  result <- queryContractId bank inviteCid
+  assertMsg "Invitation should be archived after withdrawal" (result == None)
+
+-- ============================================================
+-- Failure / Guard Tests
+-- ============================================================
+
+-- Cannot approve a KYC that is already approved
+testKYCApproveAlreadyApprovedFails : Script ()
+testKYCApproveAlreadyApprovedFails = do
+  TestParties{bank, regulator, investor1} <- allocateTestParties
+  approvedCid <- setupApprovedKYC bank regulator investor1
+
+  -- ApproveKYC asserts status == KYCPending; this must fail
+  submitMustFail bank do
+    exerciseCmd approvedCid ApproveKYC
+
+-- Cannot revoke a KYC that is still pending
+testKYCRevokePendingFails : Script ()
+testKYCRevokePendingFails = do
+  TestParties{bank, regulator, investor1} <- allocateTestParties
+
+  pendingCid <- submit bank do
+    createCmd InvestorKYC with
+      investor          = investor1
+      escrowBank        = bank
+      regulator         = regulator
+      fullName          = "Bob Jones"
+      jurisdiction      = "US"
+      accreditation     = Accredited
+      isAccredited      = True
+      amlCleared        = True
+      sanctionsCleared  = True
+      status            = KYCPending
+      approvalDate      = date 2026 Jan 1
+      expiryDate        = date 2027 Jan 1
+      kycProviderRef    = "JUMIO-BOB-001"
+      lastScreeningDate = date 2026 Jan 1
+
+  -- RevokeKYC asserts status == KYCApproved; this must fail
+  submitMustFail bank do
+    exerciseCmd pendingCid RevokeKYC
+
+-- Renewal expiry must be strictly after the current expiry
+testKYCRenewEarlierExpiryFails : Script ()
+testKYCRenewEarlierExpiryFails = do
+  TestParties{bank, regulator, investor1} <- allocateTestParties
+  approvedCid <- setupApprovedKYC bank regulator investor1  -- expiryDate = 2027 Jan 1
+
+  -- newExpiry must be > expiryDate; same date should fail
+  submitMustFail bank do
+    exerciseCmd approvedCid RenewKYC with
+      newExpiry        = date 2027 Jan 1   -- equal, not strictly greater
+      newScreeningDate = date 2026 Dec 1

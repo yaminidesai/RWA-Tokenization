@@ -26,6 +26,7 @@ template TokenizedBond
   with
     escrowBank       : Party
     currentOwner     : Party             -- the investor who holds this token
+    regulator        : Party             -- regulatory observer for market surveillance
     metadata         : BondMetadata
     units            : Decimal           -- number of bond units owned
     mintDate         : Date
@@ -34,7 +35,7 @@ template TokenizedBond
     transferHistory  : [Text]            -- ordered list of transfer references (audit trail)
   where
     signatory escrowBank
-    observer currentOwner
+    observer currentOwner, regulator
 
     -- Note: contract keys are not supported in LF 2.1 target.
     -- Off-chain services track TokenizedBond contract IDs per investor/CUSIP
@@ -101,6 +102,7 @@ template TokenizedBond
         create CouponPaymentRecord with
           escrowBank
           investor     = currentOwner
+          regulator
           metadata
           units
           couponDate
@@ -117,6 +119,7 @@ template TokenizedBond
         create RedemptionRequest with
           investor     = currentOwner
           escrowBank
+          regulator
           metadata
           units
           status       = RedemptionRequested
@@ -143,6 +146,7 @@ template CouponPaymentRecord
   with
     escrowBank   : Party
     investor     : Party
+    regulator    : Party
     metadata     : BondMetadata
     units        : Decimal           -- units held at payment date
     couponDate   : Date
@@ -150,7 +154,7 @@ template CouponPaymentRecord
     paymentRef   : Text              -- ACH trace number or Fedwire IMAD
   where
     signatory escrowBank
-    observer investor
+    observer investor, regulator
 
     ensure couponAmount.amount > 0.0
         && units > 0.0
@@ -170,11 +174,13 @@ template RedemptionRequest
   with
     investor   : Party
     escrowBank : Party
+    regulator  : Party
     metadata   : BondMetadata
     units      : Decimal
     status     : RedemptionStatus
   where
     signatory escrowBank, investor
+    observer regulator
 
     ensure units > 0.0
 

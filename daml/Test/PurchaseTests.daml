@@ -1,0 +1,208 @@
+-- Tests for the purchase / minting workflow:
+--   EscrowRequest -> ApproveRequest -> ConfirmCustodyAndMint (atomic)
+--   and the reject / cancel / price-limit paths.
+module Test.PurchaseTests where
+
+import DA.Date
+import Daml.Script
+import RWA.Types
+import RWA.KYC
+import RWA.AssetCustody
+import RWA.EscrowRequest
+import RWA.TokenizedBond
+import Test.Setup
+
+-- ============================================================
+-- Happy-Path Tests
+-- ============================================================
+
+-- Full purchase and mint: EscrowRequest -> ApproveRequest ->
+-- ConfirmCustodyAndMint + RecordMinting + TokenizedBond (atomic).
+-- Verifies the 1:1 backing invariant: totalMintedUnits == units after mint.
+testFullPurchaseAndMintFlow : Script ()
+testFullPurchaseAndMintFlow = do
+  TestParties{bank, regulator, investor1} <- allocateTestParties
+  custodyCid <- setupCustodyRecord bank regulator 1000.0
+
+  (bondCid, newCustodyCid) <- mintBond bank regulator investor1 custodyCid 100.0 "DTC-SETTLE-001"
+
+  Some bond <- queryContractId bank bondCid
+  assertMsg "Bond owner should be investor1" (bond.currentOwner == investor1)
+  assertMsg "Bond units should be 100" (bond.units == 100.0)
+  assertMsg "DTC ref should be set" (bond.dtcSettlementRef == "DTC-SETTLE-001")
+
+  Some custody <- queryContractId bank newCustodyCid
+  assertMsg "Minted units tracked in custody record" (custody.totalMintedUnits == 100.0)
+  assertMsg "Custody quantity unchanged" (custody.quantity == 1000.0)
+
+-- Mint two separate positions against the same custody record.
+-- Verifies cumulative minted units accumulate correctly.
+testMintTwoPositions : Script ()
+testMintTwoPositions = do
+  TestParties{bank, regulator, investor1, investor2} <- allocateTestParties
+  custodyCid <- setupCustodyRecord bank regulator 1000.0
+
+  (_, custodyCid2) <- mintBond bank regulator investor1 custodyCid  300.0 "DTC-SETTLE-001"
+  (_,  custodyCid3) <- mintBond bank regulator investor2 custodyCid2 400.0 "DTC-SETTLE-002"
+
+  Some custody <- queryContractId bank custodyCid3
+  assertMsg "Total minted should be 700" (custody.totalMintedUnits == 700.0)
+
+-- Bank increases the custody position (buys more bonds to satisfy demand)
+testIncreaseCustodyPosition : Script ()
+testIncreaseCustodyPosition = do
+  TestParties{bank, regulator} <- allocateTestParties
+  custodyCid <- setupCustodyRecord bank regulator 500.0
+
+  newCustodyCid <- submit bank do
+    exerciseCmd custodyCid IncreaseCustodyPosition with
+      additionalQuantity = 300.0
+      additionalCost     = MonetaryAmount with amount = 285000.0; currency = "USD"
+      newSettlementRef   = "DTC-MT545-002"
+
+  Some custody <- queryContractId bank newCustodyCid
+  assertMsg "Quantity should be 800" (custody.quantity == 800.0)
+  assertMsg "isFullyRedeemed should be False" (not custody.isFullyRedeemed)
+
+-- ============================================================
+-- Rejection / Cancellation Tests
+-- ============================================================
+
+-- Bank rejects a purchase request with a reason
+testRejectEscrowRequest : Script ()
+testRejectEscrowRequest = do
+  TestParties{bank, regulator, investor1} <- allocateTestParties
+
+  escrowCid <- submitMulti [bank, investor1] [] do
+    createCmd EscrowRequest with
+      investor           = investor1
+      escrowBank         = bank
+      regulator          = regulator
+      metadata           = sampleBondMetadata
+      requestedUnits     = 100.0
+      maxPurchasePrice   = MonetaryAmount with amount = 100000.0; currency = "USD"
+      requestDate        = date 2026 Jan 12
+      investorAccountRef = "ACCT-001"
+      notes              = ""
+
+  rejectedCid <- submit bank do
+    exerciseCmd escrowCid RejectRequest with
+      rejectionReason = "Investor KYC expired"
+
+  Some rejected <- queryContractId bank rejectedCid
+  assertMsg "Rejection reason should be set" (rejected.rejectionReason == "Investor KYC expired")
+  assertMsg "Requested units preserved" (rejected.requestedUnits == 100.0)
+
+  -- Original escrow request should be archived
+  original <- queryContractId bank escrowCid
+  assertMsg "EscrowRequest should be archived" (original == None)
+
+-- Investor cancels their own pending request
+testInvestorCancelsEscrowRequest : Script ()
+testInvestorCancelsEscrowRequest = do
+  TestParties{bank, regulator, investor1} <- allocateTestParties
+
+  escrowCid <- submitMulti [bank, investor1] [] do
+    createCmd EscrowRequest with
+      investor           = investor1
+      escrowBank         = bank
+      regulator          = regulator
+      metadata           = sampleBondMetadata
+      requestedUnits     = 50.0
+      maxPurchasePrice   = MonetaryAmount with amount = 50000.0; currency = "USD"
+      requestDate        = date 2026 Jan 12
+      investorAccountRef = "ACCT-001"
+      notes              = ""
+
+  submit investor1 do
+    exerciseCmd escrowCid CancelRequest
+
+  result <- queryContractId investor1 escrowCid
+  assertMsg "EscrowRequest should be archived after cancellation" (result == None)
+
+-- Bank cancels an already-approved purchase (e.g. bond unavailable at DTC)
+testCancelApprovedPurchase : Script ()
+testCancelApprovedPurchase = do
+  TestParties{bank, regulator, investor1} <- allocateTestParties
+
+  escrowCid <- submitMulti [bank, investor1] [] do
+    createCmd EscrowRequest with
+      investor           = investor1
+      escrowBank         = bank
+      regulator          = regulator
+      metadata           = sampleBondMetadata
+      requestedUnits     = 200.0
+      maxPurchasePrice   = MonetaryAmount with amount = 200000.0; currency = "USD"
+      requestDate        = date 2026 Jan 12
+      investorAccountRef = "ACCT-001"
+      notes              = ""
+
+  approvedCid <- submit bank do
+    exerciseCmd escrowCid ApproveRequest
+
+  rejectedCid <- submit bank do
+    exerciseCmd approvedCid CancelApprovedPurchase with
+      cancellationReason = "Bond unavailable from primary dealer"
+
+  Some rejected <- queryContractId bank rejectedCid
+  assertMsg "Cancellation reason recorded" (rejected.rejectionReason == "Bond unavailable from primary dealer")
+
+-- ============================================================
+-- Failure / Guard Tests
+-- ============================================================
+
+-- Cannot mint more tokens than the custody quantity (1:1 backing invariant)
+testMintExceedsCustodyQuantityFails : Script ()
+testMintExceedsCustodyQuantityFails = do
+  TestParties{bank, regulator} <- allocateTestParties
+  custodyCid <- setupCustodyRecord bank regulator 100.0
+
+  -- RecordMinting asserts newTotal <= quantity; 150 > 100 must fail
+  submitMustFail bank do
+    exerciseCmd custodyCid RecordMinting with mintedUnits = 150.0
+
+-- Actual purchase price cannot exceed investor's stated maximum
+testMintExceedsPriceLimitFails : Script ()
+testMintExceedsPriceLimitFails = do
+  TestParties{bank, regulator, investor1} <- allocateTestParties
+
+  escrowCid <- submitMulti [bank, investor1] [] do
+    createCmd EscrowRequest with
+      investor           = investor1
+      escrowBank         = bank
+      regulator          = regulator
+      metadata           = sampleBondMetadata
+      requestedUnits     = 100.0
+      maxPurchasePrice   = MonetaryAmount with amount = 90000.0; currency = "USD"  -- max $900/unit
+      requestDate        = date 2026 Jan 12
+      investorAccountRef = "ACCT-001"
+      notes              = ""
+
+  approvedCid <- submit bank do
+    exerciseCmd escrowCid ApproveRequest
+
+  -- Actual price $950/unit exceeds investor max of $900/unit; must fail
+  submitMustFail bank do
+    exerciseCmd approvedCid ConfirmCustodyAndMint with
+      dtcSettlementRef = "DTC-SETTLE-001"
+      actualPrice      = MonetaryAmount with amount = 95000.0; currency = "USD"
+
+-- Reject requires a non-empty reason
+testRejectWithEmptyReasonFails : Script ()
+testRejectWithEmptyReasonFails = do
+  TestParties{bank, regulator, investor1} <- allocateTestParties
+
+  escrowCid <- submitMulti [bank, investor1] [] do
+    createCmd EscrowRequest with
+      investor           = investor1
+      escrowBank         = bank
+      regulator          = regulator
+      metadata           = sampleBondMetadata
+      requestedUnits     = 100.0
+      maxPurchasePrice   = MonetaryAmount with amount = 100000.0; currency = "USD"
+      requestDate        = date 2026 Jan 12
+      investorAccountRef = "ACCT-001"
+      notes              = ""
+
+  submitMustFail bank do
+    exerciseCmd escrowCid RejectRequest with rejectionReason = ""

@@ -1,0 +1,138 @@
+-- Tests for TokenizedBond transfer workflows:
+--   full transfer, split transfer, and guard assertions.
+module Test.TransferTests where
+
+import DA.Date
+import Daml.Script
+import RWA.Types
+import RWA.AssetCustody
+import RWA.TokenizedBond
+import Test.Setup
+
+-- ============================================================
+-- Happy-Path Tests
+-- ============================================================
+
+-- Bank + investor1 co-sign a full transfer to investor2.
+-- Verifies ownership changes and transfer reference is recorded in history.
+testTransferOwnership : Script ()
+testTransferOwnership = do
+  TestParties{bank, regulator, investor1, investor2} <- allocateTestParties
+  custodyCid <- setupCustodyRecord bank regulator 1000.0
+  (bondCid, _) <- mintBond bank regulator investor1 custodyCid 100.0 "DTC-SETTLE-001"
+
+  -- Both currentOwner (investor1) and bank must co-sign
+  newBondCid <- submitMulti [bank, investor1] [] do
+    exerciseCmd bondCid TransferOwnership with
+      newOwner    = investor2
+      transferRef = "TRANSFER-REF-001"
+
+  Some newBond <- queryContractId bank newBondCid
+  assertMsg "Owner should be investor2" (newBond.currentOwner == investor2)
+  assertMsg "Units unchanged" (newBond.units == 100.0)
+  assertMsg "Transfer ref in history" (newBond.transferHistory == ["TRANSFER-REF-001"])
+
+  -- Original bond contract should be archived
+  original <- queryContractId bank bondCid
+  assertMsg "Original bond should be archived" (original == None)
+
+-- investor1 transfers 40 units to investor2, keeps 60.
+-- Verifies both resulting contracts have correct unit amounts and ownership.
+testSplitTransfer : Script ()
+testSplitTransfer = do
+  TestParties{bank, regulator, investor1, investor2} <- allocateTestParties
+  custodyCid <- setupCustodyRecord bank regulator 1000.0
+  (bondCid, _) <- mintBond bank regulator investor1 custodyCid 100.0 "DTC-SETTLE-001"
+
+  (remainderCid, transferredCid) <- submitMulti [bank, investor1] [] do
+    exerciseCmd bondCid SplitTransfer with
+      newOwner      = investor2
+      transferUnits = 40.0
+      transferRef   = "SPLIT-REF-001"
+
+  Some remainder <- queryContractId bank remainderCid
+  assertMsg "Remainder owner is investor1" (remainder.currentOwner == investor1)
+  assertMsg "Remainder units are 60" (remainder.units == 60.0)
+
+  Some transferred <- queryContractId bank transferredCid
+  assertMsg "Transferred owner is investor2" (transferred.currentOwner == investor2)
+  assertMsg "Transferred units are 40" (transferred.units == 40.0)
+  assertMsg "Transfer ref in history" (transferred.transferHistory == ["SPLIT-REF-001"])
+
+-- Chain of two transfers: investor1 -> investor2 -> investor1.
+-- Verifies transfer history grows correctly across multiple hops.
+testTransferChain : Script ()
+testTransferChain = do
+  TestParties{bank, regulator, investor1, investor2} <- allocateTestParties
+  custodyCid <- setupCustodyRecord bank regulator 1000.0
+  (bondCid, _) <- mintBond bank regulator investor1 custodyCid 50.0 "DTC-SETTLE-001"
+
+  bond2Cid <- submitMulti [bank, investor1] [] do
+    exerciseCmd bondCid TransferOwnership with
+      newOwner    = investor2
+      transferRef = "TRANSFER-001"
+
+  bond3Cid <- submitMulti [bank, investor2] [] do
+    exerciseCmd bond2Cid TransferOwnership with
+      newOwner    = investor1
+      transferRef = "TRANSFER-002"
+
+  Some bond3 <- queryContractId bank bond3Cid
+  assertMsg "Final owner is investor1" (bond3.currentOwner == investor1)
+  -- Most recent transfer is at the head of the list
+  assertMsg "History has both transfers" (bond3.transferHistory == ["TRANSFER-002", "TRANSFER-001"])
+
+-- ============================================================
+-- Failure / Guard Tests
+-- ============================================================
+
+-- Cannot transfer to the same party (self-transfer)
+testTransferToSelfFails : Script ()
+testTransferToSelfFails = do
+  TestParties{bank, regulator, investor1} <- allocateTestParties
+  custodyCid <- setupCustodyRecord bank regulator 1000.0
+  (bondCid, _) <- mintBond bank regulator investor1 custodyCid 100.0 "DTC-SETTLE-001"
+
+  submitMultiMustFail [bank, investor1] [] do
+    exerciseCmd bondCid TransferOwnership with
+      newOwner    = investor1   -- same as currentOwner
+      transferRef = "TRANSFER-001"
+
+-- SplitTransfer requires transferUnits < units (strict less-than).
+-- Use TransferOwnership to move an entire position.
+testSplitEntirePositionFails : Script ()
+testSplitEntirePositionFails = do
+  TestParties{bank, regulator, investor1, investor2} <- allocateTestParties
+  custodyCid <- setupCustodyRecord bank regulator 1000.0
+  (bondCid, _) <- mintBond bank regulator investor1 custodyCid 100.0 "DTC-SETTLE-001"
+
+  submitMultiMustFail [bank, investor1] [] do
+    exerciseCmd bondCid SplitTransfer with
+      newOwner      = investor2
+      transferUnits = 100.0   -- equal to total, not strictly less
+      transferRef   = "SPLIT-001"
+
+-- Cannot split more units than the position holds
+testSplitMoreThanOwnedFails : Script ()
+testSplitMoreThanOwnedFails = do
+  TestParties{bank, regulator, investor1, investor2} <- allocateTestParties
+  custodyCid <- setupCustodyRecord bank regulator 1000.0
+  (bondCid, _) <- mintBond bank regulator investor1 custodyCid 100.0 "DTC-SETTLE-001"
+
+  submitMultiMustFail [bank, investor1] [] do
+    exerciseCmd bondCid SplitTransfer with
+      newOwner      = investor2
+      transferUnits = 150.0   -- more than 100 owned
+      transferRef   = "SPLIT-001"
+
+-- Transfer reference cannot be empty
+testTransferEmptyRefFails : Script ()
+testTransferEmptyRefFails = do
+  TestParties{bank, regulator, investor1, investor2} <- allocateTestParties
+  custodyCid <- setupCustodyRecord bank regulator 1000.0
+  (bondCid, _) <- mintBond bank regulator investor1 custodyCid 100.0 "DTC-SETTLE-001"
+
+  submitMultiMustFail [bank, investor1] [] do
+    exerciseCmd bondCid TransferOwnership with
+      newOwner    = investor2
+      transferRef = ""

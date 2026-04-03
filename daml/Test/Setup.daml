@@ -1,0 +1,134 @@
+-- Shared test helpers: party allocation, sample data, and reusable setup flows.
+-- All tests import this module to avoid duplicating boilerplate.
+module Test.Setup where
+
+import DA.Date
+import Daml.Script
+import RWA.Types
+import RWA.KYC
+import RWA.AssetCustody
+import RWA.EscrowRequest
+import RWA.TokenizedBond
+
+-- ============================================================
+-- Parties
+-- ============================================================
+
+data TestParties = TestParties with
+  bank      : Party
+  regulator : Party
+  investor1 : Party
+  investor2 : Party
+
+allocateTestParties : Script TestParties
+allocateTestParties = do
+  bank      <- allocateParty "EscrowBank"
+  regulator <- allocateParty "Regulator"
+  investor1 <- allocateParty "Investor1"
+  investor2 <- allocateParty "Investor2"
+  return TestParties with ..
+
+-- ============================================================
+-- Sample Data
+-- ============================================================
+
+-- Standard 10-year T-Note used across all tests
+sampleBondMetadata : BondMetadata
+sampleBondMetadata = BondMetadata with
+  cusip        = "912828YV6"
+  isin         = "US912828YV65"
+  issuerName   = "US Department of the Treasury"
+  assetClass   = USTreasury
+  treasuryType = Some TNote
+  faceValue    = 1000.0
+  couponRate   = 0.045
+  couponFreq   = Semiannual
+  maturityDate = date 2030 Jan 15
+  issuanceDate = date 2020 Jan 15
+  regExemption = NoExemption
+
+-- ============================================================
+-- Setup Helpers
+-- ============================================================
+
+-- Creates a pending InvestorKYC and immediately approves it.
+-- In production the bank creates pending KYC after off-chain Jumio/OFAC checks pass.
+setupApprovedKYC : Party -> Party -> Party -> Script (ContractId InvestorKYC)
+setupApprovedKYC bank regulator investor = do
+  pendingCid <- submit bank do
+    createCmd InvestorKYC with
+      investor          = investor
+      escrowBank        = bank
+      regulator         = regulator
+      fullName          = "Test Investor"
+      jurisdiction      = "US"
+      accreditation     = Accredited
+      isAccredited      = True
+      amlCleared        = True
+      sanctionsCleared  = True
+      status            = KYCPending
+      approvalDate      = date 2026 Jan 1
+      expiryDate        = date 2027 Jan 1
+      kycProviderRef    = "JUMIO-REF-001"
+      lastScreeningDate = date 2026 Jan 1
+  submit bank do
+    exerciseCmd pendingCid ApproveKYC
+
+-- Creates a CustodyRecord attesting the bank holds `qty` units at DTC.
+setupCustodyRecord : Party -> Party -> Decimal -> Script (ContractId CustodyRecord)
+setupCustodyRecord bank regulator qty = do
+  submit bank do
+    createCmd CustodyRecord with
+      escrowBank       = bank
+      regulator        = regulator
+      metadata         = sampleBondMetadata
+      quantity         = qty
+      purchaseDate     = date 2026 Jan 10
+      purchasePrice    = MonetaryAmount with amount = qty * 950.0; currency = "USD"
+      dtcSettlementRef = "DTC-MT545-001"
+      dealerReference  = "DEALER-001"
+      fedwireImad      = Some "20260110MMQFMP2P000001"
+      totalMintedUnits = 0.0
+      isFullyRedeemed  = False
+
+-- Full atomic mint flow:
+--   EscrowRequest -> ApproveRequest -> ConfirmCustodyAndMint
+--   + RecordMinting + TokenizedBond creation (all in one DAML transaction)
+-- Returns (TokenizedBond contract ID, updated CustodyRecord contract ID).
+mintBond
+  : Party -> Party -> Party -> ContractId CustodyRecord -> Decimal -> Text
+  -> Script (ContractId TokenizedBond, ContractId CustodyRecord)
+mintBond bank regulator investor custodyCid units dtcRef = do
+  escrowCid <- submitMulti [bank, investor] [] do
+    createCmd EscrowRequest with
+      investor           = investor
+      escrowBank         = bank
+      regulator          = regulator
+      metadata           = sampleBondMetadata
+      requestedUnits     = units
+      maxPurchasePrice   = MonetaryAmount with amount = units * 1000.0; currency = "USD"
+      requestDate        = date 2026 Jan 12
+      investorAccountRef = "ACCT-001"
+      notes              = ""
+  approvedCid <- submit bank do
+    exerciseCmd escrowCid ApproveRequest
+  -- Each command is a separate submit; Commands monad in DAML 3.x is applicative-only.
+  -- In production these are composed into one transaction by the off-chain Minting Service.
+  submit bank do
+    exerciseCmd approvedCid ConfirmCustodyAndMint with
+      dtcSettlementRef = dtcRef
+      actualPrice      = MonetaryAmount with amount = units * 950.0; currency = "USD"
+  newCustodyCid <- submit bank do
+    exerciseCmd custodyCid RecordMinting with mintedUnits = units
+  bondCid <- submit bank do
+    createCmd TokenizedBond with
+      escrowBank       = bank
+      currentOwner     = investor
+      regulator        = regulator
+      metadata         = sampleBondMetadata
+      units            = units
+      mintDate         = date 2026 Jan 15
+      custodyCusip     = "912828YV6"
+      dtcSettlementRef = dtcRef
+      transferHistory  = []
+  return (bondCid, newCustodyCid)

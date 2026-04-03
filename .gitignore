@@ -1,2 +1,7 @@
 .claude/
 .daml/
+node_modules/
+backend/.env
+dist/
+build/
+*.log

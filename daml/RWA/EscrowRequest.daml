@@ -31,6 +31,7 @@ template EscrowRequest
   with
     investor           : Party
     escrowBank         : Party
+    regulator          : Party
     metadata           : BondMetadata
     requestedUnits     : Decimal
     maxPurchasePrice   : MonetaryAmount  -- investor's stated price ceiling
@@ -39,6 +40,7 @@ template EscrowRequest
     notes              : Text
   where
     signatory escrowBank, investor
+    observer regulator
 
     ensure requestedUnits > 0.0
         && maxPurchasePrice.amount > 0.0
@@ -51,6 +53,7 @@ template EscrowRequest
         create ApprovedPurchase with
           investor
           escrowBank
+          regulator
           metadata
           approvedUnits    = requestedUnits
           approvedMaxPrice = maxPurchasePrice
@@ -67,6 +70,7 @@ template EscrowRequest
         create RejectedRequest with
           investor
           escrowBank
+          regulator
           metadata
           requestedUnits
           rejectionReason
@@ -85,6 +89,7 @@ template ApprovedPurchase
   with
     investor           : Party
     escrowBank         : Party
+    regulator          : Party
     metadata           : BondMetadata
     approvedUnits      : Decimal
     approvedMaxPrice   : MonetaryAmount
@@ -92,6 +97,7 @@ template ApprovedPurchase
     investorAccountRef : Text
   where
     signatory escrowBank, investor
+    observer regulator
 
     ensure approvedUnits > 0.0
         && approvedMaxPrice.amount > 0.0
@@ -122,6 +128,7 @@ template ApprovedPurchase
         create RejectedRequest with
           investor
           escrowBank
+          regulator
           metadata
           requestedUnits  = approvedUnits
           rejectionReason = cancellationReason
@@ -133,12 +140,14 @@ template RejectedRequest
   with
     investor        : Party
     escrowBank      : Party
+    regulator       : Party
     metadata        : BondMetadata
     requestedUnits  : Decimal
     rejectionReason : Text
     rejectionDate   : Date
   where
     signatory escrowBank, investor
+    observer regulator
 
     ensure requestedUnits > 0.0
         && rejectionReason /= ""
