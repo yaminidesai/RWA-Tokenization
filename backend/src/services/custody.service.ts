@@ -6,7 +6,8 @@ import { ledger, TEMPLATE_IDS } from '../ledger/client'
 import { config } from '../config'
 import type { CustodyRecordPayload, BondMetadata } from '../ledger/types'
 
-const BANK = config.canton.bankPartyId
+const BANK      = config.canton.bankPartyId
+const REGULATOR = config.canton.regulatorPartyId
 
 export interface CreateCustodyInput {
   cusip: string
@@ -33,34 +34,38 @@ export const custodyService = {
     const today = new Date().toISOString().slice(0, 10)
 
     const metadata: BondMetadata = {
-      cusip: input.cusip,
-      isin: input.isin,
-      issuerName: input.issuerName,
-      assetClass: input.assetClass,
+      cusip:       input.cusip,
+      isin:        input.isin,
+      issuerName:  input.issuerName,
+      assetClass:  input.assetClass,
       treasuryType: input.treasuryType ?? null,
-      faceValue: input.faceValue.toString(),
-      couponRate: input.couponRate.toString(),
-      couponFreq: input.couponFreq,
-      maturityDate: input.maturityDate,
-      issuanceDate: input.issuanceDate,
-      regExemption: input.regExemption,
+      faceValue:   input.faceValue.toString(),
+      couponRate:  input.couponRate.toString(),
+      couponFreq:  input.couponFreq,
+      maturityDate:  input.maturityDate,
+      issuanceDate:  input.issuanceDate,
+      regExemption:  input.regExemption,
     }
 
     let contractId = `mock-custody-${Date.now()}`
     try {
-      const payload: Record<string, unknown> = {
-        escrowBank: BANK,
-        metadata,
-        quantity: input.quantity.toString(),
-        purchaseDate: today,
-        purchasePrice: { amount: input.purchasePriceTotal.toString(), currency: 'USD' },
-        dtcSettlementRef: input.dtcSettlementRef,
-        dealerReference: input.dealerReference,
-        fedwireImad: input.fedwireImad ?? null,
-        totalMintedUnits: '0',
-        isFullyRedeemed: false,
-      }
-      const contract = await ledger.create<CustodyRecordPayload>(TEMPLATE_IDS.CustodyRecord, payload, BANK)
+      const contract = await ledger.create<CustodyRecordPayload>(
+        TEMPLATE_IDS.CustodyRecord,
+        {
+          escrowBank:       BANK,
+          regulator:        REGULATOR,
+          metadata,
+          quantity:         input.quantity.toString(),
+          purchaseDate:     today,
+          purchasePrice:    { amount: input.purchasePriceTotal.toString(), currency: 'USD' },
+          dtcSettlementRef: input.dtcSettlementRef,
+          dealerReference:  input.dealerReference,
+          fedwireImad:      input.fedwireImad ?? null,
+          totalMintedUnits: '0',
+          isFullyRedeemed:  false,
+        },
+        BANK,
+      )
       contractId = contract.contractId
     } catch (err) {
       console.warn('[Custody] Canton unavailable, using mock contract ID:', err)

@@ -45,13 +45,15 @@ export const transferService = {
         { newOwner: toInvestor.canton_party_id, transferRef },
         [BANK, holding.owner_party_id],
       )
-      newContractId = (result as { contractId?: string }).contractId ?? newContractId
+      newContractId = result.contractId ?? newContractId
     } catch (err) {
       console.warn('[Transfer] Canton transfer failed:', err)
     }
 
-    // Archive old holding, create new one
-    await db.query(`UPDATE holdings SET status = 'transferred', updated_at = NOW() WHERE id = $1`, [holdingId])
+    await db.query(
+      `UPDATE holdings SET status = 'transferred', updated_at = NOW() WHERE id = $1`,
+      [holdingId],
+    )
 
     const newHoldingResult = await db.query(
       `INSERT INTO holdings
@@ -104,13 +106,16 @@ export const transferService = {
     const toInvestor = toInvestorResult.rows[0]
     if (!toInvestor) throw new Error(`No investor found with email: ${toEmail}`)
 
-    const toKyc = await db.query(`SELECT status FROM kyc_records WHERE investor_id = $1`, [toInvestor.id])
+    const toKyc = await db.query(
+      `SELECT status FROM kyc_records WHERE investor_id = $1`,
+      [toInvestor.id],
+    )
     if (toKyc.rows[0]?.status !== 'approved') {
       throw new Error('Recipient must have approved KYC to receive bonds')
     }
 
-    const transferRef = `SPLIT-${uuidv4().slice(0, 8).toUpperCase()}`
-    let remainderContractId = `mock-bond-${uuidv4()}`
+    const transferRef     = `SPLIT-${uuidv4().slice(0, 8).toUpperCase()}`
+    let remainderContractId  = `mock-bond-${uuidv4()}`
     let transferredContractId = `mock-bond-${uuidv4()}`
 
     try {
@@ -118,36 +123,54 @@ export const transferService = {
         TEMPLATE_IDS.TokenizedBond,
         holding.canton_contract_id,
         'SplitTransfer',
-        { newOwner: toInvestor.canton_party_id, transferUnits: transferUnits.toString(), transferRef },
+        {
+          newOwner:      toInvestor.canton_party_id,
+          transferUnits: transferUnits.toString(),
+          transferRef,
+        },
         [BANK, holding.owner_party_id],
       )
-      const exerciseResult = result as { exerciseResult?: [string, string] }
-      if (exerciseResult.exerciseResult) {
-        ;[remainderContractId, transferredContractId] = exerciseResult.exerciseResult
+      // SplitTransfer returns (ContractId TokenizedBond, ContractId TokenizedBond)
+      // Both created contracts appear as CreatedEvents in the transaction
+      if (result.contractIds && result.contractIds.length >= 2) {
+        ;[remainderContractId, transferredContractId] = result.contractIds
+      } else if (result.contractId) {
+        transferredContractId = result.contractId
       }
     } catch (err) {
       console.warn('[Transfer] Canton split failed:', err)
     }
 
-    // Archive original holding
-    await db.query(`UPDATE holdings SET status = 'transferred', updated_at = NOW() WHERE id = $1`, [holdingId])
+    await db.query(
+      `UPDATE holdings SET status = 'transferred', updated_at = NOW() WHERE id = $1`,
+      [holdingId],
+    )
 
     const remainderUnits = Number(holding.units) - transferUnits
 
-    // Create remainder holding for sender
     const remainderResult = await db.query(
-      `INSERT INTO holdings (canton_contract_id, investor_id, custody_record_id, cusip, units, mint_date, dtc_settlement_ref, transfer_history)
+      `INSERT INTO holdings
+         (canton_contract_id, investor_id, custody_record_id, cusip, units,
+          mint_date, dtc_settlement_ref, transfer_history)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
-      [remainderContractId, fromInvestorId, holding.custody_record_id, holding.cusip, remainderUnits,
-       holding.mint_date, holding.dtc_settlement_ref, JSON.stringify(holding.transfer_history ?? [])],
+      [
+        remainderContractId, fromInvestorId, holding.custody_record_id,
+        holding.cusip, remainderUnits, holding.mint_date,
+        holding.dtc_settlement_ref, JSON.stringify(holding.transfer_history ?? []),
+      ],
     )
 
-    // Create transferred holding for recipient
     const transferredResult = await db.query(
-      `INSERT INTO holdings (canton_contract_id, investor_id, custody_record_id, cusip, units, mint_date, dtc_settlement_ref, transfer_history)
+      `INSERT INTO holdings
+         (canton_contract_id, investor_id, custody_record_id, cusip, units,
+          mint_date, dtc_settlement_ref, transfer_history)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
-      [transferredContractId, toInvestor.id, holding.custody_record_id, holding.cusip, transferUnits,
-       holding.mint_date, holding.dtc_settlement_ref, JSON.stringify([...(holding.transfer_history ?? []), transferRef])],
+      [
+        transferredContractId, toInvestor.id, holding.custody_record_id,
+        holding.cusip, transferUnits, holding.mint_date,
+        holding.dtc_settlement_ref,
+        JSON.stringify([...(holding.transfer_history ?? []), transferRef]),
+      ],
     )
 
     await db.query(
@@ -155,8 +178,10 @@ export const transferService = {
          (source_holding_id, from_investor_id, to_investor_id, units, transfer_ref,
           is_split, new_holding_id, remainder_holding_id)
        VALUES ($1,$2,$3,$4,$5,true,$6,$7)`,
-      [holdingId, fromInvestorId, toInvestor.id, transferUnits, transferRef,
-       transferredResult.rows[0].id, remainderResult.rows[0].id],
+      [
+        holdingId, fromInvestorId, toInvestor.id, transferUnits, transferRef,
+        transferredResult.rows[0].id, remainderResult.rows[0].id,
+      ],
     )
 
     return { remainder: remainderResult.rows[0], transferred: transferredResult.rows[0] }

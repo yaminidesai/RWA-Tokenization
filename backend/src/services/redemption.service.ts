@@ -32,7 +32,7 @@ export const redemptionService = {
         {},
         holding.canton_party_id,
       )
-      redemptionContractId = (result as { contractId?: string }).contractId ?? redemptionContractId
+      redemptionContractId = result.contractId ?? redemptionContractId
     } catch (err) {
       console.warn('[Redemption] Canton initiate failed:', err)
     }
@@ -44,7 +44,10 @@ export const redemptionService = {
       [holdingId, investorId, redemptionContractId, holding.units],
     )
 
-    await db.query(`UPDATE holdings SET status = 'redemption_pending', updated_at = NOW() WHERE id = $1`, [holdingId])
+    await db.query(
+      `UPDATE holdings SET status = 'redemption_pending', updated_at = NOW() WHERE id = $1`,
+      [holdingId],
+    )
     return result.rows[0]
   },
 
@@ -64,8 +67,7 @@ export const redemptionService = {
     if (!req) throw new Error('Redemption request not found')
     if (req.status !== 'requested') throw new Error(`Cannot approve redemption with status: ${req.status}`)
 
-    // Process DTC redemption and Fedwire payment
-    const dtcResult = await redeemBondsAtDTC(req.cusip, Number(req.units), Number(req.face_value))
+    const dtcResult     = await redeemBondsAtDTC(req.cusip, Number(req.units), Number(req.face_value))
     const fedwireResult = await sendFedwireTransfer(
       investorAccountRef,
       dtcResult.principalAmount,
@@ -81,11 +83,17 @@ export const redemptionService = {
         'ApproveRedemption',
         {
           redemptionAmount: { amount: dtcResult.principalAmount.toString(), currency: 'USD' },
-          paymentRef: fedwireResult.imad,
+          paymentRef:       fedwireResult.imad,
         },
         BANK,
       )
-      await ledger.exercise(TEMPLATE_IDS.TokenizedBond, req.bond_contract_id, 'BurnToken', {}, BANK)
+      await ledger.exercise(
+        TEMPLATE_IDS.TokenizedBond,
+        req.bond_contract_id,
+        'BurnToken',
+        {},
+        BANK,
+      )
       await ledger.exercise(
         TEMPLATE_IDS.CustodyRecord,
         req.custody_record_id,
@@ -104,7 +112,10 @@ export const redemptionService = {
       [dtcResult.principalAmount, fedwireResult.imad, redemptionRequestId],
     )
 
-    await db.query(`UPDATE holdings SET status = 'redeemed', updated_at = NOW() WHERE id = $1`, [req.holding_id])
+    await db.query(
+      `UPDATE holdings SET status = 'redeemed', updated_at = NOW() WHERE id = $1`,
+      [req.holding_id],
+    )
     await custodyService.decrementMintedUnits(req.custody_record_id, Number(req.units))
 
     return { redemptionAmount: dtcResult.principalAmount, paymentRef: fedwireResult.imad }

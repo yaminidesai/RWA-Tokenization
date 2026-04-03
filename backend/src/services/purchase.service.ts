@@ -15,7 +15,8 @@ import { purchaseBondsAtDTC } from '../mock/dtc'
 import type { EscrowRequestPayload, TokenizedBondPayload } from '../ledger/types'
 import { v4 as uuidv4 } from 'uuid'
 
-const BANK = config.canton.bankPartyId
+const BANK      = config.canton.bankPartyId
+const REGULATOR = config.canton.regulatorPartyId
 
 export const purchaseService = {
 
@@ -26,7 +27,6 @@ export const purchaseService = {
     maxPurchasePrice: number,
     investorAccountRef: string,
   ) {
-    // Verify KYC is approved
     const kyc = await db.query(
       `SELECT status FROM kyc_records WHERE investor_id = $1`,
       [investorId],
@@ -35,7 +35,6 @@ export const purchaseService = {
       throw new Error('KYC must be approved before purchasing bonds')
     }
 
-    // Find the custody record for this CUSIP
     const custody = await custodyService.getBondByCusip(cusip)
     if (!custody) throw new Error(`No available bonds for CUSIP ${cusip}`)
     if (custody.available_units < requestedUnits) {
@@ -43,7 +42,7 @@ export const purchaseService = {
     }
 
     const investor = await db.query(`SELECT * FROM investors WHERE id = $1`, [investorId])
-    const inv = investor.rows[0]
+    const inv      = investor.rows[0]
 
     const today = new Date().toISOString().slice(0, 10)
     let escrowContractId = `mock-escrow-${uuidv4()}`
@@ -53,12 +52,13 @@ export const purchaseService = {
       const escrow = await ledger.create<EscrowRequestPayload>(
         TEMPLATE_IDS.EscrowRequest,
         {
-          investor: inv.canton_party_id,
-          escrowBank: BANK,
+          investor:          inv.canton_party_id,
+          escrowBank:        BANK,
+          regulator:         REGULATOR,
           metadata,
-          requestedUnits: requestedUnits.toString(),
-          maxPurchasePrice: { amount: (maxPurchasePrice * requestedUnits).toString(), currency: 'USD' },
-          requestDate: today,
+          requestedUnits:    requestedUnits.toString(),
+          maxPurchasePrice:  { amount: (maxPurchasePrice * requestedUnits).toString(), currency: 'USD' },
+          requestDate:       today,
           investorAccountRef,
           notes: '',
         },
@@ -106,7 +106,7 @@ export const purchaseService = {
         {},
         BANK,
       )
-      approvedContractId = (result as { contractId?: string }).contractId ?? approvedContractId
+      approvedContractId = result.contractId ?? approvedContractId
     } catch (err) {
       console.warn('[Purchase] Canton approve failed:', err)
     }
@@ -147,7 +147,7 @@ export const purchaseService = {
         {
           dtcSettlementRef: dtcResult.settlementRef,
           actualPrice: {
-            amount: (dtcResult.settledPrice * Number(req.requested_units)).toString(),
+            amount:   (dtcResult.settledPrice * Number(req.requested_units)).toString(),
             currency: 'USD',
           },
         },
@@ -171,7 +171,10 @@ export const purchaseService = {
     }
 
     const today = new Date().toISOString().slice(0, 10)
-    const investorResult = await db.query(`SELECT canton_party_id FROM investors WHERE id = $1`, [req.investor_id])
+    const investorResult = await db.query(
+      `SELECT canton_party_id FROM investors WHERE id = $1`,
+      [req.investor_id],
+    )
     const investorPartyId = investorResult.rows[0]?.canton_party_id
 
     // Step 3: Create TokenizedBond
@@ -181,14 +184,15 @@ export const purchaseService = {
         const bond = await ledger.create<TokenizedBondPayload>(
           TEMPLATE_IDS.TokenizedBond,
           {
-            escrowBank: BANK,
-            currentOwner: investorPartyId,
-            metadata: buildMetadata(custody),
-            units: req.requested_units?.toString(),
-            mintDate: today,
-            custodyCusip: req.cusip,
+            escrowBank:       BANK,
+            currentOwner:     investorPartyId,
+            regulator:        REGULATOR,
+            metadata:         buildMetadata(custody),
+            units:            req.requested_units?.toString(),
+            mintDate:         today,
+            custodyCusip:     req.cusip,
             dtcSettlementRef: dtcResult.settlementRef,
-            transferHistory: [],
+            transferHistory:  [],
           },
           BANK,
         )
@@ -198,10 +202,8 @@ export const purchaseService = {
       console.warn('[Purchase] TokenizedBond creation failed:', err)
     }
 
-    // Update custody minted units in DB
     await custodyService.updateMintedUnits(custody.id as string, Number(req.requested_units))
 
-    // Create holding record
     await db.query(
       `INSERT INTO holdings
          (canton_contract_id, investor_id, custody_record_id, cusip, units, mint_date, dtc_settlement_ref)
@@ -212,7 +214,6 @@ export const purchaseService = {
       ],
     )
 
-    // Update purchase request status
     await db.query(
       `UPDATE purchase_requests
        SET status = 'minted', actual_price = $1, dtc_settlement_ref = $2, updated_at = NOW()
@@ -222,7 +223,10 @@ export const purchaseService = {
   },
 
   async rejectPurchaseRequest(purchaseRequestId: string, reason: string) {
-    const reqResult = await db.query(`SELECT * FROM purchase_requests WHERE id = $1`, [purchaseRequestId])
+    const reqResult = await db.query(
+      `SELECT * FROM purchase_requests WHERE id = $1`,
+      [purchaseRequestId],
+    )
     const req = reqResult.rows[0]
     if (!req) throw new Error('Purchase request not found')
 
@@ -274,14 +278,14 @@ export const purchaseService = {
 
 function buildMetadata(custody: Record<string, unknown>) {
   return {
-    cusip: custody.cusip,
-    isin: custody.isin,
-    issuerName: custody.issuer_name,
-    assetClass: custody.asset_class,
+    cusip:        custody.cusip,
+    isin:         custody.isin,
+    issuerName:   custody.issuer_name,
+    assetClass:   custody.asset_class,
     treasuryType: custody.treasury_type ?? null,
-    faceValue: custody.face_value?.toString(),
-    couponRate: custody.coupon_rate?.toString(),
-    couponFreq: custody.coupon_freq,
+    faceValue:    custody.face_value?.toString(),
+    couponRate:   custody.coupon_rate?.toString(),
+    couponFreq:   custody.coupon_freq,
     maturityDate: custody.maturity_date,
     issuanceDate: custody.issuance_date,
     regExemption: custody.reg_exemption,

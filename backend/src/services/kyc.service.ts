@@ -2,7 +2,7 @@
 //
 // Flow:
 //   1. Investor registers → KYC record created with status 'registered'
-//   2. Bank creates KYCInvitation on Canton
+//   2. Bank creates KYCInvitation on Canton (bank + regulator see it)
 //   3. System auto-accepts on behalf of investor (triggers off-chain verification)
 //   4. Jumio/OFAC mock runs
 //   5. If passed: bank creates InvestorKYC on Canton, status → 'pending_approval'
@@ -14,7 +14,8 @@ import { config } from '../config'
 import { runKYCVerification, runOFACScreening } from '../mock/jumio'
 import type { InvestorKYCPayload } from '../ledger/types'
 
-const BANK = config.canton.bankPartyId
+const BANK      = config.canton.bankPartyId
+const REGULATOR = config.canton.regulatorPartyId
 
 export const kycService = {
 
@@ -35,18 +36,23 @@ export const kycService = {
       inv.canton_party_id = partyId
     }
 
-    // Create KYCInvitation on Canton (bank signs)
+    // Create KYCInvitation on Canton (bank signs, regulator observes)
     const today = new Date().toISOString().slice(0, 10)
     let invitationContractId: string | null = null
     try {
       const invitation = await ledger.create(
         TEMPLATE_IDS.KYCInvitation,
-        { investor: inv.canton_party_id, escrowBank: BANK, invitedDate: today },
+        {
+          investor:    inv.canton_party_id,
+          escrowBank:  BANK,
+          regulator:   REGULATOR,
+          invitedDate: today,
+        },
         BANK,
       )
       invitationContractId = invitation.contractId
 
-      // Auto-accept on behalf of investor (they authorized this when registering)
+      // Auto-accept on behalf of investor (they authorized this at registration)
       await ledger.exercise(
         TEMPLATE_IDS.KYCInvitation,
         invitation.contractId,
@@ -58,7 +64,6 @@ export const kycService = {
       console.warn('[KYC] Canton unavailable, continuing with off-chain KYC only:', err)
     }
 
-    // Update KYC record to 'accepted' and save invitation contract ID
     await db.query(
       `UPDATE kyc_records SET status = 'accepted', invitation_contract_id = $1, updated_at = NOW()
        WHERE investor_id = $2`,
@@ -91,31 +96,35 @@ export const kycService = {
       return
     }
 
-    const today = new Date().toISOString().slice(0, 10)
+    const today      = new Date().toISOString().slice(0, 10)
     const expiryDate = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10)
 
-    // Create InvestorKYC on Canton
+    // Create InvestorKYC on Canton (bank is signatory, investor + regulator are observers)
     let kycContractId: string | null = null
     try {
-      const investorRow = await db.query(`SELECT canton_party_id FROM investors WHERE id = $1`, [investorId])
+      const investorRow = await db.query(
+        `SELECT canton_party_id FROM investors WHERE id = $1`,
+        [investorId],
+      )
       const partyId = investorRow.rows[0]?.canton_party_id
 
       if (partyId) {
         const kycContract = await ledger.create<InvestorKYCPayload>(
           TEMPLATE_IDS.InvestorKYC,
           {
-            investor: partyId,
-            escrowBank: BANK,
-            fullName: inv.full_name,
-            jurisdiction: inv.jurisdiction,
-            accreditation: inv.accreditation_level ?? 'Accredited',
-            isAccredited: true,
-            amlCleared: true,
-            sanctionsCleared: true,
-            status: 'KYCPending',
-            approvalDate: today,
+            investor:          partyId,
+            escrowBank:        BANK,
+            regulator:         REGULATOR,
+            fullName:          inv.full_name,
+            jurisdiction:      inv.jurisdiction,
+            accreditation:     inv.accreditation_level ?? 'Accredited',
+            isAccredited:      true,
+            amlCleared:        true,
+            sanctionsCleared:  true,
+            status:            'KYCPending',
+            approvalDate:      today,
             expiryDate,
-            kycProviderRef: jumioResult.reference,
+            kycProviderRef:    jumioResult.reference,
             lastScreeningDate: today,
           },
           BANK,
@@ -154,7 +163,6 @@ export const kycService = {
     if (!kyc) throw new Error('KYC record not found')
     if (kyc.status !== 'pending_approval') throw new Error(`Cannot approve KYC with status: ${kyc.status}`)
 
-    // Approve on Canton
     if (kyc.kyc_contract_id) {
       try {
         await ledger.exercise(TEMPLATE_IDS.InvestorKYC, kyc.kyc_contract_id, 'ApproveKYC', {}, BANK)

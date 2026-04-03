@@ -25,8 +25,17 @@ export const config = {
   },
 
   canton: {
+    // Base URL of the Canton HTTP JSON API v2 (started with --json-api-port)
     jsonApiUrl: optional('CANTON_JSON_API_URL', 'http://localhost:7575'),
+
+    // Full Canton party IDs (format: DisplayName::1220<hex>)
+    // Set these in .env once you have allocated parties via the ledger.
     bankPartyId: optional('BANK_PARTY_ID', 'EscrowBank'),
+    regulatorPartyId: optional('REGULATOR_PARTY_ID', 'Regulator'),
+
+    // Canton user ID for the bank (used in v2 submit commands).
+    // Created via: participant.parties.allocate("bank-app") in Canton console.
+    bankUserId: optional('BANK_USER_ID', 'bank-app'),
   },
 
   mock: {
