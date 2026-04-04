@@ -1,5 +1,6 @@
 import express from 'express'
 import cors from 'cors'
+import cookieParser from 'cookie-parser'
 import rateLimit from 'express-rate-limit'
 import { config } from '../config'
 import authRoutes from './routes/auth.routes'
@@ -14,6 +15,7 @@ export const app = express()
 // ── Security middleware ───────────────────────────────────────────────────────
 
 app.use(cors({ origin: config.cors.origins, credentials: true }))
+app.use(cookieParser())
 app.use(express.json())
 
 // Audit log every request (must be after json parsing so body is available)

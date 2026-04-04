@@ -64,10 +64,16 @@ router.post('/register', async (req: Request, res: Response) => {
     const token = jwt.sign(
       { id: user.id, email: user.email, role: user.role, investorId },
       config.jwt.secret,
-      { expiresIn: config.jwt.expiresIn } as jwt.SignOptions,
+      { expiresIn: config.jwt.expiresIn, algorithm: 'HS256' } as jwt.SignOptions,
     )
 
-    res.status(201).json({ token, user: { id: user.id, email: user.email, role: user.role, investorId } })
+    res.cookie('token', token, {
+      httpOnly: true,
+      secure: config.nodeEnv === 'production',
+      sameSite: 'strict',
+      maxAge: 8 * 60 * 60 * 1000, // 8 hours in ms
+    })
+    res.status(201).json({ user: { id: user.id, email: user.email, role: user.role, investorId } })
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Registration failed'
     res.status(500).json({ error: message })
@@ -106,14 +112,26 @@ router.post('/login', async (req: Request, res: Response) => {
     const token = jwt.sign(
       { id: user.id, email: user.email, role: user.role, investorId: user.investor_id },
       config.jwt.secret,
-      { expiresIn: config.jwt.expiresIn } as jwt.SignOptions,
+      { expiresIn: config.jwt.expiresIn, algorithm: 'HS256' } as jwt.SignOptions,
     )
 
-    res.json({ token, user: { id: user.id, email: user.email, role: user.role, investorId: user.investor_id } })
+    res.cookie('token', token, {
+      httpOnly: true,
+      secure: config.nodeEnv === 'production',
+      sameSite: 'strict',
+      maxAge: 8 * 60 * 60 * 1000,
+    })
+    res.json({ user: { id: user.id, email: user.email, role: user.role, investorId: user.investor_id } })
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Login failed'
     res.status(500).json({ error: message })
   }
+})
+
+// POST /api/auth/logout
+router.post('/logout', (_req: Request, res: Response) => {
+  res.clearCookie('token', { httpOnly: true, secure: config.nodeEnv === 'production', sameSite: 'strict' })
+  res.json({ status: 'logged out' })
 })
 
 export default router

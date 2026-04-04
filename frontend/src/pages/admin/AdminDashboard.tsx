@@ -12,12 +12,19 @@ export default function AdminDashboard() {
 
   const [rejectForm, setRejectForm] = useState<{ type: 'purchase' | 'redemption'; id: string } | null>(null)
   const [rejectReason, setRejectReason] = useState('')
+  const [redemptionAccountRef, setRedemptionAccountRef] = useState('')
   const [msg, setMsg] = useState('')
   const [couponForm, setCouponForm] = useState({ cusip: '', couponDate: '', annualCouponRate: '' })
 
   const approvePurchase = useMutation({
     mutationFn: (id: string) => adminApi.approvePurchase(id),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['admin-purchases'] }); setMsg('Purchase approved — DTC settlement in progress') },
+    onError: (e: any) => setMsg(e.response?.data?.error ?? 'Error'),
+  })
+
+  const rejectPurchase = useMutation({
+    mutationFn: ({ id, reason }: { id: string; reason: string }) => adminApi.rejectPurchase(id, reason),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['admin-purchases'] }); setRejectForm(null); setMsg('Purchase rejected') },
     onError: (e: any) => setMsg(e.response?.data?.error ?? 'Error'),
   })
 
@@ -109,13 +116,22 @@ export default function AdminDashboard() {
                     </div>
                     <p className="font-semibold">{Number(r.units).toLocaleString()} units</p>
                   </div>
-                  <button
-                    onClick={() => approveRedemption.mutate({ id: r.id, accountRef: `ACCT-${r.investor_id}` })}
-                    disabled={approveRedemption.isPending}
-                    className="text-sm px-3 py-1.5 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 transition-colors"
-                  >
-                    Approve & Pay
-                  </button>
+                  <div className="flex gap-2 items-center">
+                    <input
+                      type="text"
+                      placeholder="Bank account ref (e.g. ACCT-12345)"
+                      value={redemptionAccountRef}
+                      onChange={(e) => setRedemptionAccountRef(e.target.value)}
+                      className="flex-1 border rounded-lg px-2 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-brand-500"
+                    />
+                    <button
+                      onClick={() => approveRedemption.mutate({ id: r.id, accountRef: redemptionAccountRef })}
+                      disabled={approveRedemption.isPending || !redemptionAccountRef.trim()}
+                      className="text-sm px-3 py-1.5 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 transition-colors whitespace-nowrap"
+                    >
+                      {approveRedemption.isPending ? 'Processing…' : 'Approve & Pay'}
+                    </button>
+                  </div>
                 </div>
               ))}
             </div>
@@ -179,11 +195,14 @@ export default function AdminDashboard() {
             />
             <div className="flex gap-2">
               <button
-                onClick={() => { /* TODO: wire reject */ setRejectForm(null) }}
-                disabled={!rejectReason}
+                onClick={() => {
+                  if (!rejectForm) return
+                  rejectPurchase.mutate({ id: rejectForm.id, reason: rejectReason })
+                }}
+                disabled={!rejectReason || rejectPurchase.isPending}
                 className="flex-1 bg-red-600 text-white py-2 rounded-lg text-sm hover:bg-red-700 disabled:opacity-50"
               >
-                Confirm reject
+                {rejectPurchase.isPending ? 'Rejecting…' : 'Confirm reject'}
               </button>
               <button onClick={() => setRejectForm(null)} className="flex-1 border py-2 rounded-lg text-sm hover:bg-gray-50">
                 Cancel

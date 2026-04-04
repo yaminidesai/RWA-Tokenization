@@ -16,7 +16,7 @@ export default function Login() {
     setError('')
     try {
       const res = await authApi.login(form)
-      login(res.data.token, res.data.user)
+      login(res.data.user)
       navigate(res.data.user.role === 'admin' ? '/admin' : '/')
     } catch (err: any) {
       setError(err.response?.data?.error ?? 'Login failed')
@@ -73,10 +73,6 @@ export default function Login() {
           </Link>
         </p>
 
-        <div className="mt-6 p-3 bg-gray-50 rounded-lg text-xs text-gray-400">
-          <p className="font-medium text-gray-500 mb-1">Demo credentials</p>
-          <p>Admin: admin@bank.com / Admin1234!</p>
-        </div>
       </div>
     </div>
   )

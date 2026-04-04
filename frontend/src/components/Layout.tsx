@@ -1,10 +1,13 @@
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { useAuthStore } from '../store/auth.store'
+import { authApi } from '../api/client'
+import { useQueryClient } from '@tanstack/react-query'
 
 export default function Layout({ children }: { children: React.ReactNode }) {
   const { user, logout } = useAuthStore()
   const location = useLocation()
   const navigate = useNavigate()
+  const qc = useQueryClient()
 
   const nav = [
     { path: '/',         label: 'Dashboard' },
@@ -12,7 +15,9 @@ export default function Layout({ children }: { children: React.ReactNode }) {
     { path: '/holdings', label: 'My Holdings' },
   ]
 
-  function handleLogout() {
+  async function handleLogout() {
+    await authApi.logout().catch(() => {}) // clear httpOnly cookie server-side
+    qc.clear()                             // wipe cached data
     logout()
     navigate('/login')
   }

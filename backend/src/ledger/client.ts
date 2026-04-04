@@ -230,13 +230,25 @@ class LedgerClient {
       },
     }
 
-    const res = await this.http.post<V2TransactionResponse>(
-      '/v2/commands/submit-and-wait-for-transaction',
-      body,
-      { headers: this.authHeader(parties) },
-    )
+    let txData: V2TransactionResponse
+    try {
+      const res = await this.http.post<V2TransactionResponse>(
+        '/v2/commands/submit-and-wait-for-transaction',
+        body,
+        { headers: this.authHeader(parties) },
+      )
+      txData = res.data
+    } catch (err) {
+      // HTTP 409 = duplicate commandId — Canton returns the original transaction result
+      const axErr = err as AxiosError<V2TransactionResponse>
+      if (axErr.response?.status === 409 && axErr.response.data?.transaction) {
+        txData = axErr.response.data
+      } else {
+        throw err
+      }
+    }
 
-    const created = this.extractCreated(res.data)
+    const created = this.extractCreated(txData)
     if (!created) {
       throw new Error(`Create of ${templateId} returned no CreatedEvent in transaction`)
     }
@@ -286,17 +298,28 @@ class LedgerClient {
       },
     }
 
-    const res = await this.http.post<V2TransactionResponse>(
-      '/v2/commands/submit-and-wait-for-transaction',
-      body,
-      { headers: this.authHeader(parties) },
-    )
+    let txData: V2TransactionResponse
+    try {
+      const res = await this.http.post<V2TransactionResponse>(
+        '/v2/commands/submit-and-wait-for-transaction',
+        body,
+        { headers: this.authHeader(parties) },
+      )
+      txData = res.data
+    } catch (err) {
+      const axErr = err as AxiosError<V2TransactionResponse>
+      if (axErr.response?.status === 409 && axErr.response.data?.transaction) {
+        txData = axErr.response.data
+      } else {
+        throw err
+      }
+    }
 
-    const created = this.extractAllCreated(res.data)
+    const created = this.extractAllCreated(txData)
     return {
-      contractId:    created[0],
-      contractIds:   created,
-      exerciseResult: res.data.transaction,
+      contractId:     created[0],
+      contractIds:    created,
+      exerciseResult: txData.transaction,
     }
   }
 
@@ -343,24 +366,39 @@ class LedgerClient {
       },
     }
 
-    const res = await this.http.post<V2TransactionResponse>(
-      '/v2/commands/submit-and-wait-for-transaction',
-      body,
-      { headers: this.authHeader(parties) },
-    )
+    let txData: V2TransactionResponse
+    try {
+      const res = await this.http.post<V2TransactionResponse>(
+        '/v2/commands/submit-and-wait-for-transaction',
+        body,
+        { headers: this.authHeader(parties) },
+      )
+      txData = res.data
+    } catch (err) {
+      const axErr = err as AxiosError<V2TransactionResponse>
+      if (axErr.response?.status === 409 && axErr.response.data?.transaction) {
+        txData = axErr.response.data
+      } else {
+        throw err
+      }
+    }
 
     const allCreatedIds: string[] = []
     const createdByTemplate: Record<string, string> = {}
 
-    for (const ev of res.data.transaction.events) {
+    for (const ev of txData.transaction.events) {
       if ('CreatedEvent' in ev) {
         const cid = ev.CreatedEvent.contractId
         allCreatedIds.push(cid)
-        // Template ID is "<packageHash>:Module:Name" — use the last segment
-        const parts = ev.CreatedEvent.templateId.split(':')
-        const name  = parts[parts.length - 1]
-        if (!(name in createdByTemplate)) {
-          createdByTemplate[name] = cid
+        // Key on full templateId to avoid collisions across modules with same short name
+        const tid = ev.CreatedEvent.templateId
+        if (!(tid in createdByTemplate)) {
+          createdByTemplate[tid] = cid
+        }
+        // Also store by short name (last segment) as a convenience fallback
+        const shortName = tid.split(':').pop()!
+        if (shortName && !(shortName in createdByTemplate)) {
+          createdByTemplate[shortName] = cid
         }
       }
     }

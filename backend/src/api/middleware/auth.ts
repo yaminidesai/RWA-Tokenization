@@ -7,14 +7,23 @@ export interface AuthRequest extends Request {
 }
 
 export function requireAuth(req: AuthRequest, res: Response, next: NextFunction) {
+  // Accept token from Authorization header (API clients) OR httpOnly cookie (browser)
+  let token: string | undefined
   const header = req.headers.authorization
-  if (!header?.startsWith('Bearer ')) {
+  if (header?.startsWith('Bearer ')) {
+    token = header.slice(7)
+  } else if ((req as any).cookies?.token) {
+    token = (req as any).cookies.token
+  }
+
+  if (!token) {
     res.status(401).json({ error: 'Missing or invalid Authorization header' })
     return
   }
   try {
-    const token = header.slice(7)
-    const decoded = jwt.verify(token, config.jwt.secret) as AuthRequest['user']
+    const decoded = jwt.verify(token, config.jwt.secret, {
+      algorithms: ['HS256'],
+    }) as AuthRequest['user']
     req.user = decoded
     next()
   } catch {

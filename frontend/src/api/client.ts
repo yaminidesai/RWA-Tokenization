@@ -1,21 +1,15 @@
 import axios from 'axios'
 
-export const api = axios.create({ baseURL: '/api', timeout: 30_000 })
+// withCredentials=true sends the httpOnly token cookie on every request.
+// The token is never accessible to JavaScript — it lives only in the cookie.
+export const api = axios.create({ baseURL: '/api', timeout: 30_000, withCredentials: true })
 
-// Attach JWT token to every request
-api.interceptors.request.use((config) => {
-  const token = localStorage.getItem('token')
-  if (token) config.headers.Authorization = `Bearer ${token}`
-  return config
-})
-
-// Redirect to login on 401
+// Redirect to login on 401 and clear any stale session data
 api.interceptors.response.use(
   (r) => r,
   (err) => {
     if (err.response?.status === 401) {
-      localStorage.removeItem('token')
-      localStorage.removeItem('user')
+      sessionStorage.removeItem('user')
       window.location.href = '/login'
     }
     return Promise.reject(err)
@@ -28,6 +22,7 @@ export const authApi = {
   register: (body: { email: string; password: string; fullName: string; jurisdiction: string }) =>
     api.post('/auth/register', body),
   login: (body: { email: string; password: string }) => api.post('/auth/login', body),
+  logout: () => api.post('/auth/logout', {}),
 }
 
 export const bondsApi = {

@@ -19,7 +19,7 @@ export default function Register() {
     setError('')
     try {
       const res = await authApi.register(form)
-      login(res.data.token, res.data.user)
+      login(res.data.user)
       navigate('/')
     } catch (err: any) {
       setError(err.response?.data?.error ?? 'Registration failed')

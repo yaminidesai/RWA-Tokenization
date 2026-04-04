@@ -1,10 +1,13 @@
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { useAuthStore } from '../store/auth.store'
+import { authApi } from '../api/client'
+import { useQueryClient } from '@tanstack/react-query'
 
 export default function AdminLayout({ children }: { children: React.ReactNode }) {
   const { logout } = useAuthStore()
   const location = useLocation()
   const navigate = useNavigate()
+  const qc = useQueryClient()
 
   const nav = [
     { path: '/admin',       label: 'Dashboard' },
@@ -12,7 +15,9 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
     { path: '/admin/bonds', label: 'Bond Inventory' },
   ]
 
-  function handleLogout() {
+  async function handleLogout() {
+    await authApi.logout().catch(() => {})
+    qc.clear()
     logout()
     navigate('/login')
   }

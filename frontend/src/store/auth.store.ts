@@ -9,26 +9,24 @@ interface User {
 
 interface AuthStore {
   user: User | null
-  token: string | null
-  login: (token: string, user: User) => void
+  login: (user: User) => void
   logout: () => void
 }
 
+// Token is stored in an httpOnly cookie set by the server — never readable by JS.
+// Only non-sensitive user profile info is kept in sessionStorage for UI display.
 export const useAuthStore = create<AuthStore>((set) => ({
   user: (() => {
-    try { return JSON.parse(localStorage.getItem('user') ?? 'null') } catch { return null }
+    try { return JSON.parse(sessionStorage.getItem('user') ?? 'null') } catch { return null }
   })(),
-  token: localStorage.getItem('token'),
 
-  login: (token, user) => {
-    localStorage.setItem('token', token)
-    localStorage.setItem('user', JSON.stringify(user))
-    set({ token, user })
+  login: (user) => {
+    sessionStorage.setItem('user', JSON.stringify(user))
+    set({ user })
   },
 
   logout: () => {
-    localStorage.removeItem('token')
-    localStorage.removeItem('user')
-    set({ token: null, user: null })
+    sessionStorage.removeItem('user')
+    set({ user: null })
   },
 }))

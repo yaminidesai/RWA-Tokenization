@@ -196,14 +196,8 @@ INSERT INTO ledger_cursor (id, offset_val)
 VALUES (1, 'begin')
 ON CONFLICT (id) DO NOTHING;
 
--- ── Seed: Bank Admin User ─────────────────────────────────────────────────────
--- Default admin password: Admin1234! (change immediately in production)
--- Hash generated with bcrypt rounds=12
-
-INSERT INTO users (email, password_hash, role)
-VALUES (
-  'admin@bank.com',
-  '$2a$12$jjWxHN6kL/HpUlO0Awn.COaYfaNyZyR098jJXwLHhmIBeUEFvvFnq',
-  'admin'
-)
-ON CONFLICT (email) DO NOTHING;
+-- ── Admin User ───────────────────────────────────────────────────────────────
+-- Do NOT seed admin credentials here. Create the initial admin via the
+-- secure out-of-band bootstrap script:
+--   cd backend && npx ts-node scripts/create-admin.ts
+-- The script prompts for email + password and stores a freshly hashed password.
