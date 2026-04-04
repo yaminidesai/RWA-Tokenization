@@ -7,3 +7,4 @@ build-options:
 dependencies:
   - daml-prim
   - daml-stdlib
+  - daml-script

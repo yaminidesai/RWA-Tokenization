@@ -135,9 +135,12 @@ interface V2TransactionResponse {
 }
 
 interface V2ActiveContractEntry {
-  activeContract?: {
-    createdEvent: V2CreatedEvent
-    synchronizerId: string
+  workflowId?: string
+  contractEntry?: {
+    JsActiveContract?: {
+      createdEvent: V2CreatedEvent
+      synchronizerId?: string
+    }
   }
 }
 
@@ -356,9 +359,9 @@ class LedgerClient {
     const entries: V2ActiveContractEntry[] = Array.isArray(res.data) ? res.data : []
 
     return entries
-      .filter(e => e.activeContract != null)
+      .filter(e => e.contractEntry?.JsActiveContract != null)
       .map(e => {
-        const ev = e.activeContract!.createdEvent
+        const ev = e.contractEntry!.JsActiveContract!.createdEvent
         return {
           templateId: ev.templateId,
           contractId: ev.contractId,

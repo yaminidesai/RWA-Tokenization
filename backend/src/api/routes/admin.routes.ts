@@ -76,8 +76,26 @@ router.get('/bonds', async (_req: AuthRequest, res: Response) => {
   }
 })
 
+// Valid DAML enum constructors — must match exactly what Types.daml declares
+const VALID_ASSET_CLASS   = new Set(['USTreasury', 'GovernmentBond', 'CorporateBond', 'MunicipalBond'])
+const VALID_TREASURY_TYPE = new Set(['TBill', 'TNote', 'TBond', 'TIPS', 'FRN'])
+const VALID_COUPON_FREQ   = new Set(['Semiannual', 'Annual', 'Quarterly', 'Monthly', 'ZeroCoupon'])
+
 router.post('/bonds', async (req: AuthRequest, res: Response) => {
   try {
+    const { assetClass, treasuryType, couponFreq } = req.body
+    if (!VALID_ASSET_CLASS.has(assetClass)) {
+      res.status(400).json({ error: `Invalid assetClass "${assetClass}". Must be one of: ${[...VALID_ASSET_CLASS].join(', ')}` })
+      return
+    }
+    if (treasuryType != null && !VALID_TREASURY_TYPE.has(treasuryType)) {
+      res.status(400).json({ error: `Invalid treasuryType "${treasuryType}". Must be one of: ${[...VALID_TREASURY_TYPE].join(', ')}` })
+      return
+    }
+    if (!VALID_COUPON_FREQ.has(couponFreq)) {
+      res.status(400).json({ error: `Invalid couponFreq "${couponFreq}". Must be one of: ${[...VALID_COUPON_FREQ].join(', ')}` })
+      return
+    }
     const bond = await custodyService.createCustodyRecord(req.body)
     res.status(201).json(bond)
   } catch (err) {
