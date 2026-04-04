@@ -4,8 +4,11 @@
 //   1. Investor submits purchase request → EscrowRequest created on Canton
 //   2. Bank verifies KYC and approves → ApprovedPurchase on Canton
 //   3. DTC mock purchases the real bond
-//   4. After DTC settlement: ConfirmCustodyAndMint + RecordMinting + TokenizedBond (separate submits)
-//   5. Investor sees their TokenizedBond holding
+//   4. ATOMIC single Canton transaction:
+//        a. ConfirmCustodyAndMint (archives ApprovedPurchase)
+//        b. RecordMinting (archives old CustodyRecord, creates new one with updated count)
+//        c. Create TokenizedBond
+//   5. DB updated atomically with row lock (prevents concurrent over-minting)
 
 import { db } from '../db/client'
 import { ledger, TEMPLATE_IDS } from '../ledger/client'
@@ -27,12 +30,17 @@ export const purchaseService = {
     maxPurchasePrice: number,
     investorAccountRef: string,
   ) {
+    // KYC must be approved AND not expired
     const kyc = await db.query(
-      `SELECT status FROM kyc_records WHERE investor_id = $1`,
+      `SELECT status, expiry_date FROM kyc_records WHERE investor_id = $1`,
       [investorId],
     )
-    if (kyc.rows[0]?.status !== 'approved') {
+    const kycRecord = kyc.rows[0]
+    if (kycRecord?.status !== 'approved') {
       throw new Error('KYC must be approved before purchasing bonds')
+    }
+    if (kycRecord.expiry_date && new Date(kycRecord.expiry_date) < new Date()) {
+      throw new Error('KYC has expired — please renew your identity verification')
     }
 
     const custody = await custodyService.getBondByCusip(cusip)
@@ -66,6 +74,7 @@ export const purchaseService = {
       )
       escrowContractId = escrow.contractId
     } catch (err) {
+      if (config.canton.strict) throw err
       console.warn('[Purchase] Canton unavailable, using mock contract ID:', err)
     }
 
@@ -80,7 +89,6 @@ export const purchaseService = {
     return result.rows[0]
   },
 
-  // Bank admin approves a purchase request and triggers DTC bond purchase
   async approvePurchaseRequest(purchaseRequestId: string) {
     const reqResult = await db.query(
       `SELECT pr.*, i.canton_party_id, i.id AS investor_id
@@ -108,6 +116,7 @@ export const purchaseService = {
       )
       approvedContractId = result.contractId ?? approvedContractId
     } catch (err) {
+      if (config.canton.strict) throw err
       console.warn('[Purchase] Canton approve failed:', err)
     }
 
@@ -118,7 +127,7 @@ export const purchaseService = {
       [approvedContractId, purchaseRequestId],
     )
 
-    // Trigger DTC purchase asynchronously
+    // Run DTC purchase + atomic minting in background
     this.executeDTCPurchaseAndMint(purchaseRequestId, req, custody, approvedContractId).catch((err) =>
       console.error('[Purchase] DTC purchase error:', err),
     )
@@ -138,38 +147,6 @@ export const purchaseService = {
       Number(req.max_purchase_price),
     )
 
-    // Step 1: ConfirmCustodyAndMint on Canton (archives ApprovedPurchase)
-    try {
-      await ledger.exercise(
-        TEMPLATE_IDS.ApprovedPurchase,
-        approvedContractId,
-        'ConfirmCustodyAndMint',
-        {
-          dtcSettlementRef: dtcResult.settlementRef,
-          actualPrice: {
-            amount:   (dtcResult.settledPrice * Number(req.requested_units)).toString(),
-            currency: 'USD',
-          },
-        },
-        BANK,
-      )
-    } catch (err) {
-      console.warn('[Purchase] ConfirmCustodyAndMint failed:', err)
-    }
-
-    // Step 2: RecordMinting on CustodyRecord
-    try {
-      await ledger.exercise(
-        TEMPLATE_IDS.CustodyRecord,
-        custody.canton_contract_id as string,
-        'RecordMinting',
-        { mintedUnits: req.requested_units?.toString() },
-        BANK,
-      )
-    } catch (err) {
-      console.warn('[Purchase] RecordMinting failed:', err)
-    }
-
     const today = new Date().toISOString().slice(0, 10)
     const investorResult = await db.query(
       `SELECT canton_party_id FROM investors WHERE id = $1`,
@@ -177,32 +154,71 @@ export const purchaseService = {
     )
     const investorPartyId = investorResult.rows[0]?.canton_party_id
 
-    // Step 3: Create TokenizedBond
-    let bondContractId = `mock-bond-${uuidv4()}`
+    // ── Atomic Canton transaction ─────────────────────────────────────────────
+    // All three operations are submitted in a single Canton transaction.
+    // If any one fails, all fail — no partial state is possible.
+    let bondContractId        = `mock-bond-${uuidv4()}`
+    let newCustodyContractId  = custody.canton_contract_id as string
+
     try {
-      if (investorPartyId) {
-        const bond = await ledger.create<TokenizedBondPayload>(
-          TEMPLATE_IDS.TokenizedBond,
+      const batch = await ledger.submitBatch(
+        [
+          // 1. Archive ApprovedPurchase, validate price ceiling
           {
-            escrowBank:       BANK,
-            currentOwner:     investorPartyId,
-            regulator:        REGULATOR,
-            metadata:         buildMetadata(custody),
-            units:            req.requested_units?.toString(),
-            mintDate:         today,
-            custodyCusip:     req.cusip,
-            dtcSettlementRef: dtcResult.settlementRef,
-            transferHistory:  [],
+            type:       'exercise',
+            templateId: TEMPLATE_IDS.ApprovedPurchase,
+            contractId: approvedContractId,
+            choice:     'ConfirmCustodyAndMint',
+            argument: {
+              dtcSettlementRef: dtcResult.settlementRef,
+              actualPrice: {
+                amount:   (dtcResult.settledPrice * Number(req.requested_units)).toString(),
+                currency: 'USD',
+              },
+            },
           },
-          BANK,
-        )
-        bondContractId = bond.contractId
-      }
+          // 2. Increment totalMintedUnits on CustodyRecord (enforces ≤ quantity)
+          {
+            type:       'exercise',
+            templateId: TEMPLATE_IDS.CustodyRecord,
+            contractId: custody.canton_contract_id as string,
+            choice:     'RecordMinting',
+            argument:   { mintedUnits: req.requested_units?.toString() },
+          },
+          // 3. Create the investor's TokenizedBond
+          ...(investorPartyId ? [{
+            type:       'create' as const,
+            templateId: TEMPLATE_IDS.TokenizedBond,
+            payload: {
+              escrowBank:       BANK,
+              currentOwner:     investorPartyId,
+              regulator:        REGULATOR,
+              metadata:         buildMetadata(custody),
+              units:            req.requested_units?.toString(),
+              mintDate:         today,
+              custodyCusip:     req.cusip,
+              dtcSettlementRef: dtcResult.settlementRef,
+              transferHistory:  [],
+            } as Record<string, unknown>,
+          }] : []),
+        ],
+        BANK,
+        `mint-${purchaseRequestId}`,   // deterministic commandId enables idempotent retry
+      )
+
+      bondContractId       = batch.createdByTemplate['TokenizedBond']  ?? bondContractId
+      newCustodyContractId = batch.createdByTemplate['CustodyRecord']  ?? newCustodyContractId
     } catch (err) {
-      console.warn('[Purchase] TokenizedBond creation failed:', err)
+      if (config.canton.strict) throw err
+      console.warn('[Purchase] Atomic minting batch failed:', err)
     }
 
-    await custodyService.updateMintedUnits(custody.id as string, Number(req.requested_units))
+    // ── DB update (locked transaction prevents concurrent over-minting) ───────
+    await custodyService.updateMintedUnitsAndContract(
+      custody.id as string,
+      Number(req.requested_units),
+      newCustodyContractId,
+    )
 
     await db.query(
       `INSERT INTO holdings
@@ -239,6 +255,7 @@ export const purchaseService = {
         BANK,
       )
     } catch (err) {
+      if (config.canton.strict) throw err
       console.warn('[Purchase] Canton reject failed:', err)
     }
 

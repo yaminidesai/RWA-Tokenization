@@ -118,12 +118,87 @@ export const custodyService = {
     return result.rows[0] ?? null
   },
 
+  /**
+   * Atomic mint update — increments total_minted_units and updates the
+   * canton_contract_id in a single locked transaction.
+   *
+   * Uses SELECT FOR UPDATE so concurrent purchases against the same CUSIP
+   * cannot race past the availability check. Throws if units would exceed
+   * the available quantity (defence-in-depth alongside the DAML invariant).
+   */
+  async updateMintedUnitsAndContract(
+    custodyRecordId: string,
+    additionalUnits: number,
+    newCantonContractId: string,
+  ) {
+    const client = await db.connect()
+    try {
+      await client.query('BEGIN')
+
+      const lockRes = await client.query(
+        `SELECT id, quantity, total_minted_units
+         FROM custody_records
+         WHERE id = $1
+         FOR UPDATE`,
+        [custodyRecordId],
+      )
+      const row = lockRes.rows[0]
+      if (!row) throw new Error('Custody record not found')
+
+      const newTotal = Number(row.total_minted_units) + additionalUnits
+      if (newTotal > Number(row.quantity)) {
+        throw new Error(
+          `Mint would exceed custody quantity: ${newTotal} > ${row.quantity}`,
+        )
+      }
+
+      await client.query(
+        `UPDATE custody_records
+         SET total_minted_units = $1,
+             canton_contract_id  = $2,
+             updated_at          = NOW()
+         WHERE id = $3`,
+        [newTotal, newCantonContractId, custodyRecordId],
+      )
+
+      await client.query('COMMIT')
+    } catch (err) {
+      await client.query('ROLLBACK')
+      throw err
+    } finally {
+      client.release()
+    }
+  },
+
+  /** Legacy single-column update — kept for backward compatibility. */
   async updateMintedUnits(custodyRecordId: string, additionalUnits: number) {
     await db.query(
       `UPDATE custody_records
        SET total_minted_units = total_minted_units + $1, updated_at = NOW()
        WHERE id = $2`,
       [additionalUnits, custodyRecordId],
+    )
+  },
+
+  /**
+   * Atomic redemption update — decrements minted units, decreases quantity,
+   * and updates the canton_contract_id after RecordRedemption creates a new
+   * CustodyRecord contract.
+   */
+  async decrementMintedUnitsAndContract(
+    custodyRecordId: string,
+    redeemedUnits: number,
+    newCantonContractId: string,
+  ) {
+    await db.query(
+      `UPDATE custody_records
+       SET total_minted_units = total_minted_units - $1,
+           quantity           = quantity - $1,
+           canton_contract_id = $2,
+           is_fully_redeemed  = (quantity - $1 = 0),
+           updated_at         = NOW()
+       WHERE id = $3`,
+      [redeemedUnits, newCantonContractId, custodyRecordId],
     )
   },
 

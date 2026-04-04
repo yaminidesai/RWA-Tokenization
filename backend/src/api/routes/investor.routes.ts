@@ -1,5 +1,22 @@
 import { Router, Response } from 'express'
+import { z } from 'zod'
 import { requireInvestor, AuthRequest } from '../middleware/auth'
+
+const purchaseSchema = z.object({
+  cusip:              z.string().min(9).max(9),
+  requestedUnits:     z.number().positive(),
+  maxPurchasePrice:   z.number().positive(),
+  investorAccountRef: z.string().min(1),
+})
+
+const transferSchema = z.object({
+  toEmail: z.string().email(),
+})
+
+const splitTransferSchema = z.object({
+  toEmail:       z.string().email(),
+  transferUnits: z.number().positive(),
+})
 import { kycService } from '../../services/kyc.service'
 import { purchaseService } from '../../services/purchase.service'
 import { transferService } from '../../services/transfer.service'
@@ -44,16 +61,17 @@ router.get('/purchases', async (req: AuthRequest, res: Response) => {
 
 router.post('/purchases', async (req: AuthRequest, res: Response) => {
   try {
-    const { cusip, requestedUnits, maxPurchasePrice, investorAccountRef } = req.body
-    if (!cusip || !requestedUnits || !maxPurchasePrice || !investorAccountRef) {
-      res.status(400).json({ error: 'cusip, requestedUnits, maxPurchasePrice, investorAccountRef are required' })
+    const parsed = purchaseSchema.safeParse(req.body)
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.issues.map(e => e.message).join('; ') })
       return
     }
+    const { cusip, requestedUnits, maxPurchasePrice, investorAccountRef } = parsed.data
     const request = await purchaseService.submitPurchaseRequest(
       req.user!.investorId!,
       cusip,
-      Number(requestedUnits),
-      Number(maxPurchasePrice),
+      requestedUnits,
+      maxPurchasePrice,
       investorAccountRef,
     )
     res.status(201).json(request)
@@ -66,11 +84,12 @@ router.post('/purchases', async (req: AuthRequest, res: Response) => {
 
 router.post('/holdings/:holdingId/transfer', async (req: AuthRequest, res: Response) => {
   try {
-    const { toEmail } = req.body
-    if (!toEmail) {
-      res.status(400).json({ error: 'toEmail is required' })
+    const parsed = transferSchema.safeParse(req.body)
+    if (!parsed.success) {
+      res.status(400).json({ error: 'toEmail must be a valid email address' })
       return
     }
+    const { toEmail } = parsed.data
     const result = await transferService.transferHolding(
       req.params.holdingId,
       req.user!.investorId!,
@@ -84,16 +103,17 @@ router.post('/holdings/:holdingId/transfer', async (req: AuthRequest, res: Respo
 
 router.post('/holdings/:holdingId/split-transfer', async (req: AuthRequest, res: Response) => {
   try {
-    const { toEmail, transferUnits } = req.body
-    if (!toEmail || !transferUnits) {
-      res.status(400).json({ error: 'toEmail and transferUnits are required' })
+    const parsed = splitTransferSchema.safeParse(req.body)
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.issues.map(e => e.message).join('; ') })
       return
     }
+    const { toEmail, transferUnits } = parsed.data
     const result = await transferService.splitTransfer(
       req.params.holdingId,
       req.user!.investorId!,
       toEmail,
-      Number(transferUnits),
+      transferUnits,
     )
     res.json(result)
   } catch (err) {

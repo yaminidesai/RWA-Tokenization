@@ -11,8 +11,10 @@ function optional(key: string, fallback: string): string {
   return process.env[key] ?? fallback
 }
 
+const isProduction = process.env.NODE_ENV === 'production'
+
 export const config = {
-  port: parseInt(optional('PORT', '3001')),
+  port:    parseInt(optional('PORT', '3001')),
   nodeEnv: optional('NODE_ENV', 'development'),
 
   db: {
@@ -20,27 +22,30 @@ export const config = {
   },
 
   jwt: {
-    secret: optional('JWT_SECRET', 'dev-secret-change-in-production'),
+    // Require a real secret in production — never allow the insecure default.
+    secret:    isProduction ? required('JWT_SECRET') : optional('JWT_SECRET', 'dev-secret-change-in-production'),
     expiresIn: optional('JWT_EXPIRES_IN', '8h'),
   },
 
   canton: {
-    // Base URL of the Canton HTTP JSON API v2 (started with --json-api-port)
-    jsonApiUrl: optional('CANTON_JSON_API_URL', 'http://localhost:7575'),
-
-    // Full Canton party IDs (format: DisplayName::1220<hex>)
-    // Set these in .env once you have allocated parties via the ledger.
-    bankPartyId: optional('BANK_PARTY_ID', 'EscrowBank'),
+    jsonApiUrl:       optional('CANTON_JSON_API_URL', 'http://localhost:7575'),
+    bankPartyId:      optional('BANK_PARTY_ID', 'EscrowBank'),
     regulatorPartyId: optional('REGULATOR_PARTY_ID', 'Regulator'),
+    bankUserId:       optional('BANK_USER_ID', 'bank-app'),
 
-    // Canton user ID for the bank (used in v2 submit commands).
-    // Created via: participant.parties.allocate("bank-app") in Canton console.
-    bankUserId: optional('BANK_USER_ID', 'bank-app'),
+    // When true, Canton errors are thrown (no mock-ID fallback).
+    // Defaults to true in production. Set STRICT_CANTON=false to override.
+    strict: optional('STRICT_CANTON', isProduction ? 'true' : 'false') === 'true',
   },
 
   mock: {
-    useRealJumio: optional('USE_REAL_JUMIO', 'false') === 'true',
-    useRealDtc: optional('USE_REAL_DTC', 'false') === 'true',
+    useRealJumio:   optional('USE_REAL_JUMIO',   'false') === 'true',
+    useRealDtc:     optional('USE_REAL_DTC',     'false') === 'true',
     useRealFedwire: optional('USE_REAL_FEDWIRE', 'false') === 'true',
+  },
+
+  cors: {
+    // Comma-separated list of allowed origins.
+    origins: optional('CORS_ORIGINS', 'http://localhost:5173,http://localhost:3000').split(','),
   },
 }

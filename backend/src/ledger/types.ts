@@ -58,6 +58,36 @@ export interface LedgerExerciseResult {
   exerciseResult?: unknown
 }
 
+/**
+ * A single command in a batch submit — either a create or an exercise.
+ * Used with ledger.submitBatch() to compose multiple DAML operations into
+ * one atomic Canton transaction.
+ */
+export type BatchCommand =
+  | {
+      type: 'create'
+      templateId: string
+      payload: Record<string, unknown>
+    }
+  | {
+      type: 'exercise'
+      templateId: string
+      contractId: string
+      choice: string
+      argument: Record<string, unknown>
+    }
+
+/**
+ * Result of an atomic batch submit.
+ * createdByTemplate maps the last segment of the template ID (e.g. "TokenizedBond")
+ * to the contract ID of the first contract created with that template name.
+ * This is deterministic because DAML processes commands in order.
+ */
+export interface BatchResult {
+  allCreatedIds: string[]
+  createdByTemplate: Record<string, string>
+}
+
 // ── DAML Contract Payload Types ───────────────────────────────────────────────
 // These mirror the DAML template field types exactly.
 // All parties are full party IDs; all Numeric fields are strings.

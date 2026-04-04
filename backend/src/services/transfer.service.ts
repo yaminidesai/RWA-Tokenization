@@ -27,11 +27,14 @@ export const transferService = {
     if (toInvestor.id === fromInvestorId) throw new Error('Cannot transfer to yourself')
 
     const toKyc = await db.query(
-      `SELECT status FROM kyc_records WHERE investor_id = $1`,
+      `SELECT status, expiry_date FROM kyc_records WHERE investor_id = $1`,
       [toInvestor.id],
     )
     if (toKyc.rows[0]?.status !== 'approved') {
       throw new Error('Recipient must have approved KYC to receive bonds')
+    }
+    if (toKyc.rows[0]?.expiry_date && new Date(toKyc.rows[0].expiry_date) < new Date()) {
+      throw new Error('Recipient KYC has expired')
     }
 
     const transferRef = `TRANSFER-${uuidv4().slice(0, 8).toUpperCase()}`
@@ -47,6 +50,7 @@ export const transferService = {
       )
       newContractId = result.contractId ?? newContractId
     } catch (err) {
+      if (config.canton.strict) throw err
       console.warn('[Transfer] Canton transfer failed:', err)
     }
 
@@ -107,11 +111,14 @@ export const transferService = {
     if (!toInvestor) throw new Error(`No investor found with email: ${toEmail}`)
 
     const toKyc = await db.query(
-      `SELECT status FROM kyc_records WHERE investor_id = $1`,
+      `SELECT status, expiry_date FROM kyc_records WHERE investor_id = $1`,
       [toInvestor.id],
     )
     if (toKyc.rows[0]?.status !== 'approved') {
       throw new Error('Recipient must have approved KYC to receive bonds')
+    }
+    if (toKyc.rows[0]?.expiry_date && new Date(toKyc.rows[0].expiry_date) < new Date()) {
+      throw new Error('Recipient KYC has expired')
     }
 
     const transferRef     = `SPLIT-${uuidv4().slice(0, 8).toUpperCase()}`
@@ -138,6 +145,7 @@ export const transferService = {
         transferredContractId = result.contractId
       }
     } catch (err) {
+      if (config.canton.strict) throw err
       console.warn('[Transfer] Canton split failed:', err)
     }
 

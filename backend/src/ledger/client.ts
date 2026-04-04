@@ -66,7 +66,7 @@
 import axios, { AxiosInstance, AxiosError } from 'axios'
 import { v4 as uuidv4 } from 'uuid'
 import { config } from '../config'
-import type { LedgerContract, LedgerExerciseResult } from './types'
+import type { LedgerContract, LedgerExerciseResult, BatchCommand, BatchResult } from './types'
 
 // ── Template IDs ─────────────────────────────────────────────────────────────
 // Format: "#<daml.yaml name>:<DAML module>:<Template>"
@@ -298,6 +298,74 @@ class LedgerClient {
       contractIds:   created,
       exerciseResult: res.data.transaction,
     }
+  }
+
+  // ── Submit an atomic batch of commands ──────────────────────────────────────
+
+  /**
+   * Submit multiple DAML commands in a single atomic Canton transaction.
+   *
+   * All commands succeed or all fail — no partial application. Use this for
+   * workflows that require atomicity across multiple contracts, e.g.:
+   *   - Minting: ConfirmCustodyAndMint + RecordMinting + create TokenizedBond
+   *   - Redemption: ApproveRedemption + BurnToken + RecordRedemption
+   *
+   * createdByTemplate maps the short template name (last ":"-segment) to the
+   * contractId of the first CreatedEvent for that template in the transaction.
+   */
+  async submitBatch(
+    commands: BatchCommand[],
+    actAs: string | string[],
+    commandId?: string,
+  ): Promise<BatchResult> {
+    const parties = Array.isArray(actAs) ? actAs : [actAs]
+
+    const jsCommands = commands.map(cmd => {
+      if (cmd.type === 'create') {
+        return { CreateCommand: { templateId: cmd.templateId, createArguments: cmd.payload } }
+      }
+      return {
+        ExerciseCommand: {
+          templateId:      cmd.templateId,
+          contractId:      cmd.contractId,
+          choice:          cmd.choice,
+          choiceArgument:  cmd.argument,
+        },
+      }
+    })
+
+    const body = {
+      commands: {
+        commandId: commandId ?? this.cmdId('batch'),
+        userId:    config.canton.bankUserId,
+        actAs:     parties,
+        commands:  jsCommands,
+      },
+    }
+
+    const res = await this.http.post<V2TransactionResponse>(
+      '/v2/commands/submit-and-wait-for-transaction',
+      body,
+      { headers: this.authHeader(parties) },
+    )
+
+    const allCreatedIds: string[] = []
+    const createdByTemplate: Record<string, string> = {}
+
+    for (const ev of res.data.transaction.events) {
+      if ('CreatedEvent' in ev) {
+        const cid = ev.CreatedEvent.contractId
+        allCreatedIds.push(cid)
+        // Template ID is "<packageHash>:Module:Name" — use the last segment
+        const parts = ev.CreatedEvent.templateId.split(':')
+        const name  = parts[parts.length - 1]
+        if (!(name in createdByTemplate)) {
+          createdByTemplate[name] = cid
+        }
+      }
+    }
+
+    return { allCreatedIds, createdByTemplate }
   }
 
   // ── Query active contracts ───────────────────────────────────────────────────

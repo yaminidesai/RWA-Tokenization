@@ -34,6 +34,7 @@ export const redemptionService = {
       )
       redemptionContractId = result.contractId ?? redemptionContractId
     } catch (err) {
+      if (config.canton.strict) throw err
       console.warn('[Redemption] Canton initiate failed:', err)
     }
 
@@ -67,6 +68,10 @@ export const redemptionService = {
     if (!req) throw new Error('Redemption request not found')
     if (req.status !== 'requested') throw new Error(`Cannot approve redemption with status: ${req.status}`)
 
+    // ── Off-chain settlement ──────────────────────────────────────────────────
+    // DTC/Fedwire runs first because ApproveRedemption requires the actual
+    // payment amount and reference as choice arguments. Save results to DB
+    // before attempting Canton so the operation is idempotent on retry.
     const dtcResult     = await redeemBondsAtDTC(req.cusip, Number(req.units), Number(req.face_value))
     const fedwireResult = await sendFedwireTransfer(
       investorAccountRef,
@@ -75,48 +80,84 @@ export const redemptionService = {
       `Bond redemption CUSIP ${req.cusip}`,
     )
 
-    // Approve on Canton + burn token + update custody
-    try {
-      await ledger.exercise(
-        TEMPLATE_IDS.RedemptionRequest,
-        req.canton_contract_id,
-        'ApproveRedemption',
-        {
-          redemptionAmount: { amount: dtcResult.principalAmount.toString(), currency: 'USD' },
-          paymentRef:       fedwireResult.imad,
-        },
-        BANK,
-      )
-      await ledger.exercise(
-        TEMPLATE_IDS.TokenizedBond,
-        req.bond_contract_id,
-        'BurnToken',
-        {},
-        BANK,
-      )
-      await ledger.exercise(
-        TEMPLATE_IDS.CustodyRecord,
-        req.custody_record_id,
-        'RecordRedemption',
-        { redeemedUnits: req.units.toString(), redemptionRef: dtcResult.redemptionRef },
-        BANK,
-      )
-    } catch (err) {
-      console.warn('[Redemption] Canton operations failed:', err)
-    }
-
+    // Persist payment details before Canton so we can retry Canton-only on failure
     await db.query(
       `UPDATE redemption_requests
-       SET status = 'approved', redemption_amount = $1, payment_ref = $2, updated_at = NOW()
+       SET redemption_amount = $1, payment_ref = $2, updated_at = NOW()
        WHERE id = $3`,
       [dtcResult.principalAmount, fedwireResult.imad, redemptionRequestId],
+    )
+
+    // ── Atomic Canton transaction ─────────────────────────────────────────────
+    // Three operations composed into one Canton transaction.
+    // If Canton fails here, DTC/Fedwire already settled but Canton state is
+    // inconsistent. The saved payment_ref above allows manual or automated retry.
+    let newCustodyContractId = req.custody_record_id  // will be updated from Canton response
+    try {
+      const custodyRecord = await custodyService.getBondById(req.custody_record_id)
+      if (!custodyRecord) throw new Error('Custody record not found')
+
+      const batch = await ledger.submitBatch(
+        [
+          // 1. Mark redemption approved on Canton (validates amount > 0, ref non-empty)
+          {
+            type:       'exercise',
+            templateId: TEMPLATE_IDS.RedemptionRequest,
+            contractId: req.canton_contract_id,
+            choice:     'ApproveRedemption',
+            argument: {
+              redemptionAmount: { amount: dtcResult.principalAmount.toString(), currency: 'USD' },
+              paymentRef:       fedwireResult.imad,
+            },
+          },
+          // 2. Burn the investor's TokenizedBond (archives it)
+          {
+            type:       'exercise',
+            templateId: TEMPLATE_IDS.TokenizedBond,
+            contractId: req.bond_contract_id,
+            choice:     'BurnToken',
+            argument:   {},
+          },
+          // 3. Decrement CustodyRecord minted units (archives old, creates new)
+          {
+            type:       'exercise',
+            templateId: TEMPLATE_IDS.CustodyRecord,
+            contractId: custodyRecord.canton_contract_id,
+            choice:     'RecordRedemption',
+            argument: {
+              redeemedUnits:  req.units.toString(),
+              redemptionRef:  dtcResult.redemptionRef,
+            },
+          },
+        ],
+        BANK,
+        `redeem-${redemptionRequestId}`,   // deterministic commandId enables idempotent retry
+      )
+
+      newCustodyContractId = batch.createdByTemplate['CustodyRecord'] ?? newCustodyContractId
+    } catch (err) {
+      if (config.canton.strict) throw err
+      console.warn('[Redemption] Atomic Canton batch failed (DTC/Fedwire already settled):', err)
+    }
+
+    // ── DB updates ────────────────────────────────────────────────────────────
+    await db.query(
+      `UPDATE redemption_requests
+       SET status = 'approved', updated_at = NOW()
+       WHERE id = $1`,
+      [redemptionRequestId],
     )
 
     await db.query(
       `UPDATE holdings SET status = 'redeemed', updated_at = NOW() WHERE id = $1`,
       [req.holding_id],
     )
-    await custodyService.decrementMintedUnits(req.custody_record_id, Number(req.units))
+
+    await custodyService.decrementMintedUnitsAndContract(
+      req.custody_record_id,
+      Number(req.units),
+      newCustodyContractId,
+    )
 
     return { redemptionAmount: dtcResult.principalAmount, paymentRef: fedwireResult.imad }
   },

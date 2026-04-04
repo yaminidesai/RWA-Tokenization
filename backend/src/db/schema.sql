@@ -71,7 +71,9 @@ CREATE TABLE IF NOT EXISTS custody_records (
   dealer_reference    TEXT NOT NULL,
   is_fully_redeemed   BOOLEAN NOT NULL DEFAULT FALSE,
   created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  -- Defence-in-depth: DB-level guard mirrors the DAML RecordMinting invariant.
+  CONSTRAINT no_over_mint CHECK (total_minted_units <= quantity)
 );
 
 -- ── Token Holdings ────────────────────────────────────────────────────────────
@@ -162,6 +164,24 @@ CREATE TABLE IF NOT EXISTS coupon_payments (
   units_at_payment    NUMERIC(20,8) NOT NULL,
   created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- ── Audit Log ────────────────────────────────────────────────────────────────
+-- Immutable record of every API request. Satisfies SOX/MiFID II requirements.
+
+CREATE TABLE IF NOT EXISTS audit_log (
+  id          UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  ts          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  user_id     UUID        REFERENCES users(id) ON DELETE SET NULL,
+  method      TEXT        NOT NULL,
+  path        TEXT        NOT NULL,
+  status_code INTEGER,
+  ip          TEXT,
+  duration_ms INTEGER,
+  body_summary TEXT   -- first 500 chars of request body (no passwords/tokens)
+);
+
+CREATE INDEX IF NOT EXISTS audit_log_ts_idx      ON audit_log (ts DESC);
+CREATE INDEX IF NOT EXISTS audit_log_user_id_idx ON audit_log (user_id);
 
 -- ── Ledger Event Cursor ───────────────────────────────────────────────────────
 -- Tracks the last processed ledger offset for event streaming

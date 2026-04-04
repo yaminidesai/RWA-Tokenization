@@ -1,5 +1,31 @@
 import { Router, Response } from 'express'
+import { z } from 'zod'
 import { requireAdmin, AuthRequest } from '../middleware/auth'
+
+const bondSchema = z.object({
+  cusip:              z.string().min(9).max(9),
+  isin:               z.string().min(12).max(12),
+  issuerName:         z.string().min(1),
+  assetClass:         z.enum(['USTreasury', 'GovernmentBond', 'CorporateBond', 'MunicipalBond']),
+  treasuryType:       z.enum(['TBill', 'TNote', 'TBond', 'TIPS', 'FRN']).optional(),
+  faceValue:          z.number().positive(),
+  couponRate:         z.number().min(0).max(1),
+  couponFreq:         z.enum(['Semiannual', 'Annual', 'Quarterly', 'Monthly', 'ZeroCoupon']),
+  maturityDate:       z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'maturityDate must be YYYY-MM-DD'),
+  issuanceDate:       z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'issuanceDate must be YYYY-MM-DD'),
+  regExemption:       z.string().min(1),
+  quantity:           z.number().positive(),
+  purchasePriceTotal: z.number().positive(),
+  dtcSettlementRef:   z.string().min(1),
+  dealerReference:    z.string().min(1),
+  fedwireImad:        z.string().optional(),
+})
+
+const couponSchema = z.object({
+  cusip:            z.string().min(9).max(9),
+  couponDate:       z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  annualCouponRate: z.number().positive().max(1),
+})
 import { kycService } from '../../services/kyc.service'
 import { custodyService } from '../../services/custody.service'
 import { purchaseService } from '../../services/purchase.service'
@@ -76,27 +102,14 @@ router.get('/bonds', async (_req: AuthRequest, res: Response) => {
   }
 })
 
-// Valid DAML enum constructors — must match exactly what Types.daml declares
-const VALID_ASSET_CLASS   = new Set(['USTreasury', 'GovernmentBond', 'CorporateBond', 'MunicipalBond'])
-const VALID_TREASURY_TYPE = new Set(['TBill', 'TNote', 'TBond', 'TIPS', 'FRN'])
-const VALID_COUPON_FREQ   = new Set(['Semiannual', 'Annual', 'Quarterly', 'Monthly', 'ZeroCoupon'])
-
 router.post('/bonds', async (req: AuthRequest, res: Response) => {
   try {
-    const { assetClass, treasuryType, couponFreq } = req.body
-    if (!VALID_ASSET_CLASS.has(assetClass)) {
-      res.status(400).json({ error: `Invalid assetClass "${assetClass}". Must be one of: ${[...VALID_ASSET_CLASS].join(', ')}` })
+    const parsed = bondSchema.safeParse(req.body)
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.issues.map(e => `${e.path.join('.')}: ${e.message}`).join('; ') })
       return
     }
-    if (treasuryType != null && !VALID_TREASURY_TYPE.has(treasuryType)) {
-      res.status(400).json({ error: `Invalid treasuryType "${treasuryType}". Must be one of: ${[...VALID_TREASURY_TYPE].join(', ')}` })
-      return
-    }
-    if (!VALID_COUPON_FREQ.has(couponFreq)) {
-      res.status(400).json({ error: `Invalid couponFreq "${couponFreq}". Must be one of: ${[...VALID_COUPON_FREQ].join(', ')}` })
-      return
-    }
-    const bond = await custodyService.createCustodyRecord(req.body)
+    const bond = await custodyService.createCustodyRecord(parsed.data)
     res.status(201).json(bond)
   } catch (err) {
     res.status(400).json({ error: (err as Error).message })
@@ -166,12 +179,13 @@ router.post('/redemptions/:id/approve', async (req: AuthRequest, res: Response) 
 
 router.post('/coupons/distribute', async (req: AuthRequest, res: Response) => {
   try {
-    const { cusip, couponDate, annualCouponRate } = req.body
-    if (!cusip || !couponDate || annualCouponRate === undefined) {
-      res.status(400).json({ error: 'cusip, couponDate, annualCouponRate are required' })
+    const parsed = couponSchema.safeParse(req.body)
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.issues.map(e => e.message).join('; ') })
       return
     }
-    const results = await couponService.distributeCoupon(cusip, couponDate, Number(annualCouponRate))
+    const { cusip, couponDate, annualCouponRate } = parsed.data
+    const results = await couponService.distributeCoupon(cusip, couponDate, annualCouponRate)
     res.json({ distributed: results.length, payments: results })
   } catch (err) {
     res.status(400).json({ error: (err as Error).message })

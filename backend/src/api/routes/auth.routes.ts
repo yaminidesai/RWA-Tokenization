@@ -1,20 +1,34 @@
 import { Router, Request, Response } from 'express'
 import bcrypt from 'bcryptjs'
 import jwt from 'jsonwebtoken'
+import { z } from 'zod'
 import { db } from '../../db/client'
 import { config } from '../../config'
 import { kycService } from '../../services/kyc.service'
+
+const registerSchema = z.object({
+  email:        z.string().email(),
+  password:     z.string().min(8, 'Password must be at least 8 characters'),
+  fullName:     z.string().min(2).max(100),
+  jurisdiction: z.string().length(2, 'jurisdiction must be ISO 3166-1 alpha-2 (2 chars)').toUpperCase(),
+})
+
+const loginSchema = z.object({
+  email:    z.string().email(),
+  password: z.string().min(1),
+})
 
 const router = Router()
 
 // POST /api/auth/register
 router.post('/register', async (req: Request, res: Response) => {
   try {
-    const { email, password, fullName, jurisdiction } = req.body
-    if (!email || !password || !fullName || !jurisdiction) {
-      res.status(400).json({ error: 'email, password, fullName, and jurisdiction are required' })
+    const parsed = registerSchema.safeParse(req.body)
+    if (!parsed.success) {
+      res.status(400).json({ error: parsed.error.issues.map(e => e.message).join('; ') })
       return
     }
+    const { email, password, fullName, jurisdiction } = parsed.data
 
     const existing = await db.query('SELECT id FROM users WHERE email = $1', [email])
     if (existing.rows[0]) {
@@ -63,11 +77,12 @@ router.post('/register', async (req: Request, res: Response) => {
 // POST /api/auth/login
 router.post('/login', async (req: Request, res: Response) => {
   try {
-    const { email, password } = req.body
-    if (!email || !password) {
+    const parsed = loginSchema.safeParse(req.body)
+    if (!parsed.success) {
       res.status(400).json({ error: 'email and password are required' })
       return
     }
+    const { email, password } = parsed.data
 
     const result = await db.query(
       `SELECT u.*, i.id AS investor_id
