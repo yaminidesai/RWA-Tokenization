@@ -276,6 +276,13 @@ export const purchaseService = {
   },
 }
 
+/** Normalise a Date | string value from PostgreSQL to "YYYY-MM-DD" for DAML. */
+function toDateString(v: unknown): string {
+  if (!v) return ''
+  const s = v instanceof Date ? v.toISOString() : String(v)
+  return s.slice(0, 10)
+}
+
 function buildMetadata(custody: Record<string, unknown>) {
   return {
     cusip:        custody.cusip,
@@ -286,8 +293,8 @@ function buildMetadata(custody: Record<string, unknown>) {
     faceValue:    custody.face_value?.toString(),
     couponRate:   custody.coupon_rate?.toString(),
     couponFreq:   custody.coupon_freq,
-    maturityDate: custody.maturity_date,
-    issuanceDate: custody.issuance_date,
+    maturityDate: toDateString(custody.maturity_date),
+    issuanceDate: toDateString(custody.issuance_date),
     regExemption: custody.reg_exemption,
   }
 }

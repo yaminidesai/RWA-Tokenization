@@ -390,15 +390,22 @@ class LedgerClient {
    */
   async allocateParty(displayName: string): Promise<string> {
     try {
+      // v2 localMetadata requires resourceVersion="" (empty string, not "0") on create
       const res = await this.http.post<{ partyDetails: { party: string } }>(
         '/v2/parties',
         {
           partyIdHint: displayName.replace(/\s+/g, ''),
-          localMetadata: { annotations: {} },
+          localMetadata: { resourceVersion: '' },
         },
         { headers: this.authHeader(config.canton.bankPartyId) },
       )
-      return res.data.partyDetails.party
+      const partyId = res.data.partyDetails.party
+
+      // Grant bank-app user CanActAs rights for this party so the bank can act
+      // on behalf of investors (custodial model — bank submits on investor's behalf).
+      await this.grantActAsRights(partyId)
+
+      return partyId
     } catch (err) {
       const ae = err as AxiosError
       console.warn(
@@ -409,6 +416,31 @@ class LedgerClient {
     // Deterministic mock: stable across restarts, usable for local dev
     const hash = Buffer.from(displayName).toString('hex').slice(0, 40)
     return `${displayName.replace(/\s+/g, '')}::122${hash}`
+  }
+
+  /**
+   * Grant bank-app user CanActAs rights for a party.
+   * Required for Canton v2 submit endpoints which validate userId ↔ actAs rights.
+   * Called automatically by allocateParty for every new investor party.
+   *
+   * v2 user rights body shape (discovered by live testing):
+   *   { userId, identityProviderId, rights: [{ kind: { CanActAs: { value: { party } } } }] }
+   */
+  async grantActAsRights(partyId: string): Promise<void> {
+    try {
+      await this.http.post(
+        `/v2/users/${config.canton.bankUserId}/rights`,
+        {
+          userId:             config.canton.bankUserId,
+          identityProviderId: '',
+          rights: [{ kind: { CanActAs: { value: { party: partyId } } } }],
+        },
+        { headers: this.authHeader(config.canton.bankPartyId) },
+      )
+    } catch (err) {
+      const ae = err as AxiosError
+      console.warn(`[Ledger] grantActAsRights(${partyId}) failed (${ae.message})`)
+    }
   }
 
   // ── Ledger state ─────────────────────────────────────────────────────────────
