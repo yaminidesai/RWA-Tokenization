@@ -5,3 +5,4 @@ backend/.env
 dist/
 build/
 *.log
+log/
