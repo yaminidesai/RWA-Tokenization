@@ -81,7 +81,7 @@ export default function BondMarket() {
                 <Info label="Available" value={`${Number(bond.available_units).toLocaleString()} units`} />
               </div>
 
-              {buyForm?.bondId === bond.id ? (
+              {buyForm !== null && buyForm.bondId === bond.id ? (
                 <div className="border-t pt-4 space-y-3">
                   {error && <p className="text-sm text-red-600">{error}</p>}
                   <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
