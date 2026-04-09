@@ -1,4 +1,4 @@
-# RWA Tokenization Platform
+# RWA - Tokenization
 
 > This project models institutional US Treasury bond tokenization on Canton Network — the workflow major financial institutions are currently building in production for DTC-custodied securities settlement.
 
