@@ -1,0 +1,6 @@
+*.daml linguist-language=DAML linguist-detectable=true
+
+frontend/node_modules/** linguist-vendored=true
+backend/node_modules/** linguist-vendored=true
+frontend/dist/** linguist-vendored=true
+backend/dist/** linguist-vendored=true
