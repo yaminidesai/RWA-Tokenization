@@ -1,34 +1,71 @@
+-- ============================================================
+-- RWA.AssetCustody — DTC Custody Attestation and Backing Invariant
+-- ============================================================
+--
+-- This module contains the single most important contract in the platform:
+-- CustodyRecord. It is the on-ledger representation of the bank's actual
+-- holdings of US Treasury bonds in its DTC (Depository Trust Company)
+-- participant account. Without a CustodyRecord attesting to sufficient
+-- underlying bonds, no TokenizedBond tokens can be minted.
+--
+-- In traditional finance, DTC is the central securities depository that
+-- holds virtually all US equity and fixed-income securities in "street name"
+-- for broker/dealers and banks. The bank acquires bonds from primary dealers
+-- via DTC's settlement system (DVP: Delivery versus Payment) and receives
+-- SWIFT MT545 settlement confirmation. This module translates that off-chain
+-- event into an on-ledger attestation that Canton-based services can trust.
+--
+-- The core invariant is enforced entirely by DAML's `ensure` clause:
+--   totalMintedUnits <= quantity
+-- This means the protocol itself prevents over-issuance. Even if the bank's
+-- off-chain minting service had a bug, the ledger would reject any transaction
+-- that would violate this constraint.
+--
+-- This module directly addresses the fundamental question any institutional
+-- tokenization proposal must answer: "How do you guarantee the token is backed?"
+-- The answer here: atomically, at the protocol level, not by application logic.
 module RWA.AssetCustody where
 
 import RWA.Types
 
 -- ============================================================
--- Custody Record — Bank's On-Ledger Attestation of DTC Holdings
+-- CustodyRecord — Bank's On-Ledger DTC Position Attestation
 -- ============================================================
 --
--- The bank holds real Treasury securities in its DTC participant account,
--- established through normal banking relationships with the US Treasury
--- (via TreasuryDirect / auction) and primary dealers.
+-- This contract represents the bank's self-attestation that it holds a
+-- specific quantity of a US Treasury CUSIP in its DTC participant account.
+-- "Self-attestation" is appropriate here because the bank is the qualified
+-- custodian — it is the trusted intermediary in this model, exactly as
+-- banks are trusted custodians in the traditional institutional market.
 --
--- Bond issuers (US Treasury) and primary dealers are NOT Canton parties.
--- They operate entirely on external infrastructure (DTC, Fedwire, SWIFT)
--- and have no visibility into or participation in the Canton ledger.
+-- Signatories:
+--   escrowBank — sole signatory. The US Treasury, primary dealers, and
+--                DTC are NOT Canton parties. They operate on external
+--                infrastructure (DTC, Fedwire Securities, SWIFT). The bank
+--                bridges between those external systems and the Canton ledger
+--                by creating this attestation after receiving DTC settlement
+--                confirmation (MT545). Only the bank can create, update, or
+--                archive custody records.
 --
--- The bank is both the operator AND the custodian. After purchasing bonds
--- off-chain and receiving DTC settlement confirmation (SWIFT MT545), the
--- bank's Custody Service creates this on-ledger record as self-attestation:
--- "I hold X units of CUSIP Y in my DTC account, confirmed by reference Z."
+-- Observers:
+--   regulator — the only party that needs to verify custody backing. The
+--               regulator uses query @CustodyRecord to see all positions and
+--               verify the 1:1 backing invariant (totalMintedUnits <= quantity)
+--               independently. This is tested directly in PrivacyTests.daml.
+--               Individual investors do NOT observe custody records — they
+--               have no need to see the bank's aggregate DTC position.
 --
--- The 1:1 token-to-bond backing invariant is enforced on-chain:
---   ensure totalMintedUnits <= quantity
--- and maintained by composing RecordMinting / RecordRedemption atomically
--- with TokenizedBond creation / archival in the same DAML transaction.
---
--- Party model:
---   escrowBank — sole signatory (no external custodian party exists)
---   No observer — regulatory audit is handled entirely off-chain
---     (Reconciliation Service exports DTC position vs. on-ledger supply
---      to SEC/OCC reporting systems on a daily schedule)
+-- Compliance:
+--   - dtcSettlementRef (MT545 confirmation) and fedwireImad provide a
+--     verifiable link to the actual DTC settlement event that underlies
+--     each custody position. Auditors can cross-check these against DTC
+--     position reports (MT535) to verify the attestation independently.
+--   - totalMintedUnits <= quantity enforced by `ensure` (DAML runtime).
+--     RecordMinting asserts newTotal <= quantity before creating the new
+--     contract. This is the primary mechanism preventing over-issuance.
+--   - RecordMinting and RecordRedemption are composed atomically with
+--     TokenizedBond creation and BurnToken — there is no state where a
+--     token exists without a corresponding custody position increment.
 
 template CustodyRecord
   with

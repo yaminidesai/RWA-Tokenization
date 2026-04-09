@@ -1,3 +1,20 @@
+// auth middleware — JWT verification for investor, admin, and shared routes.
+//
+// Token delivery: supports both Authorization: Bearer <token> (API clients,
+// testing) and httpOnly cookie named "token" (browser SPA). The cookie path
+// avoids storing the JWT in localStorage, which is vulnerable to XSS; httpOnly
+// cookies are not accessible to JavaScript at all.
+//
+// Algorithm: HS256 with the server's JWT_SECRET. The algorithms list is pinned
+// to ['HS256'] to prevent algorithm-confusion attacks (e.g., RS256/none bypass).
+// jwt.verify() automatically validates the exp claim — expired tokens return 401.
+//
+// Role-based guards:
+//   requireAuth    — any authenticated user (used on /api/bonds public listing)
+//   requireInvestor — role === 'investor' (all /api/investor/* routes)
+//   requireAdmin   — role === 'admin' (all /api/admin/* routes)
+// These are applied at the router level in app.ts, not per-endpoint, so adding
+// a new route to an existing router automatically inherits the correct guard.
 import { Request, Response, NextFunction } from 'express'
 import jwt from 'jsonwebtoken'
 import { config } from '../../config'

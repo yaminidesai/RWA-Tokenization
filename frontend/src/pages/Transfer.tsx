@@ -1,3 +1,28 @@
+/**
+ * Transfer — Bond Position Transfer to Another Investor
+ *
+ * Allows an investor to transfer all or part of a TokenizedBond position
+ * to another registered investor. Supports two DAML choices:
+ *
+ *   Full transfer:  POST /api/investor/holdings/:id/transfer
+ *     → transferService.transferHolding()
+ *     → ledger.exercise(TokenizedBond, TransferOwnership, [bank, fromInvestor])
+ *     → archives the original bond, creates new TokenizedBond with newOwner
+ *
+ *   Split transfer: POST /api/investor/holdings/:id/split-transfer
+ *     → transferService.splitTransfer()
+ *     → ledger.exercise(TokenizedBond, SplitTransfer, [bank, fromInvestor])
+ *     → archives original, creates remainder (fromInvestor) + transferred (toInvestor)
+ *
+ * Both paths require the bank's co-authorization (bank party is in the controller
+ * list alongside the investor). The bank co-signs only after verifying that the
+ * recipient has approved, non-expired KYC — this check happens in the Transfer
+ * Service before the Canton exercise is submitted. If the recipient lacks KYC,
+ * the API returns a 400 error and no on-ledger action occurs.
+ *
+ * The recipient is identified by email (human-friendly) which the backend
+ * resolves to a Canton party ID before submitting to the ledger.
+ */
 import { useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'

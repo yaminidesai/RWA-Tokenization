@@ -1,3 +1,28 @@
+// Transfer Service — orchestrates TokenizedBond ownership changes on Canton.
+//
+// This service is the enforcement layer for transfer compliance rules that
+// cannot be modeled purely in DAML. Before exercising TransferOwnership or
+// SplitTransfer on-ledger, this service verifies:
+//   1. Recipient has an active, non-expired InvestorKYC record in PostgreSQL
+//      (which mirrors the on-ledger InvestorKYC status after approval events).
+//   2. Recipient is not the same party as the sender (self-transfer prevention).
+//
+// Why check KYC off-chain when DAML already models it?
+// DAML enforces authorization and state invariants, but the check for
+// "recipient has valid KYC" requires querying a different contract (InvestorKYC)
+// during a TransferOwnership exercise. The bank's co-authorization on the
+// TransferOwnership choice is how DAML models this: the bank only co-signs
+// after verifying compliance off-chain. Refusing to exercise the choice is
+// how the bank's Transfer Service gate-keeps the rule.
+//
+// Database locking: both transferHolding and splitTransfer use SELECT ... FOR UPDATE
+// to serialize concurrent transfers on the same holding. Without this lock,
+// two simultaneous transfer requests could both pass the status check and
+// produce two child holdings from one parent — a double-spend.
+//
+// Canton command: exercises TokenizedBond.TransferOwnership or SplitTransfer
+// with [BANK, investor_party_id] as the co-signatories.
+
 import { db } from '../db/client'
 import { ledger, TEMPLATE_IDS } from '../ledger/client'
 import { config } from '../config'

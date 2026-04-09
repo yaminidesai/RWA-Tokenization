@@ -1,3 +1,23 @@
+-- ============================================================
+-- RWA.Types — Shared Domain Types for Treasury Bond Tokenization
+-- ============================================================
+--
+-- This module defines the value types, enumerations, and record types
+-- shared across all four RWA modules. Every field in every contract
+-- template is typed against these definitions.
+--
+-- The types reflect real institutional finance concepts: CUSIP and ISIN
+-- identifiers used by DTC and SWIFT; treasury instrument categories
+-- (T-Bill, T-Note, T-Bond, TIPS, FRN) as defined by the US Treasury;
+-- SEC regulatory exemptions (Reg D, Reg S, Rule 144A) that determine
+-- who is eligible to hold a given security; and settlement methods
+-- (Fedwire, ACH, SWIFT gpi) used in the fiat payment leg.
+--
+-- AccreditationLevel encodes the investor eligibility hierarchy:
+-- Retail < Accredited < QualifiedPurchaser < QualifiedInstitutionalBuyer.
+-- Higher tiers unlock bonds issued under more restrictive exemptions
+-- (e.g., Rule 144A bonds require QIB status). This hierarchy is checked
+-- off-chain by the Transfer Service before co-signing any transfer.
 module RWA.Types where
 
 -- ============================================================

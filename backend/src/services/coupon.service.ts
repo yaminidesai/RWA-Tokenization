@@ -1,4 +1,26 @@
-// Coupon Service — distributes coupon payments to all investors holding a CUSIP.
+// Coupon Service — pro-rata coupon distribution to all holders of a Treasury CUSIP.
+//
+// US Treasury bonds pay interest semiannually (T-Notes, T-Bonds, TIPS) or
+// quarterly (FRNs). When DTC receives coupon proceeds from the US Treasury and
+// credits them to the bank's participant account, it sends a corporate action
+// notification (SWIFT MT564). This service processes that event by:
+//   1. Querying all active holdings for the CUSIP from PostgreSQL
+//   2. Calculating each investor's pro-rata share: units × face_value × periodicRate
+//   3. Sending ACH payments via the Fedwire mock (production: real ACH/Fedwire)
+//   4. Exercising TokenizedBond.RecordCouponPayment for each holder on Canton
+//      [NONCONSUMING — bond remains active; creates a CouponPaymentRecord side-car]
+//   5. Inserting coupon_payment rows into PostgreSQL for investor portal queries
+//
+// Why nonconsuming matters: RecordCouponPayment does NOT archive the TokenizedBond.
+// The bond outlives multiple coupon cycles. Each cycle creates a new, separate
+// CouponPaymentRecord contract that the investor can query as their payment receipt.
+// This gives the regulator (observer on CouponPaymentRecord) a complete on-chain
+// income record that cross-checks the bank's 1099 and EDGAR coupon disclosures.
+//
+// periodicRate calculation follows US Treasury day-count conventions:
+//   Semiannual: annualRate / 2  (30/360 actual for T-Notes)
+//   Quarterly:  annualRate / 4  (actual/360 for FRNs)
+// In production, accrued interest adjustments for partial periods are required.
 // In production, this is triggered by DTC corporate action notifications (MT564).
 
 import { db } from '../db/client'

@@ -1,3 +1,26 @@
+/**
+ * CustodyManager — Bank Inventory Control for DTC-held Treasury Securities
+ *
+ * This page is where the bank records new bond acquisitions after DTC settlement
+ * confirms. Each form submission creates a CustodyRecord on Canton and a matching
+ * custody_records row in PostgreSQL:
+ *
+ *   POST /api/admin/bonds → custodyService.createCustodyRecord()
+ *   → ledger.create(CustodyRecord, bank)  [bank self-attests DTC holding to regulator]
+ *   → db.query INSERT INTO custody_records  [projection for fast portal queries]
+ *
+ * The DTC settlement ref field (MT545 confirmation number) and dealer reference
+ * are required so that auditors can cross-check the on-ledger CustodyRecord against
+ * DTC position reports (MT535) and primary dealer trade confirmations.
+ *
+ * Available units displayed here = quantity - total_minted_units. This is the
+ * pool available for investor purchase requests. When all units are minted,
+ * the bond disappears from the investor Bond Market view automatically.
+ *
+ * The regulator observer on every CustodyRecord means every bond added here is
+ * immediately visible to the regulator for market surveillance — no separate
+ * reporting step required.
+ */
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import AdminLayout from '../../components/AdminLayout'

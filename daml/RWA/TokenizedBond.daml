@@ -1,26 +1,58 @@
+-- ============================================================
+-- RWA.TokenizedBond — Core Token and Lifecycle Templates
+-- ============================================================
+--
+-- This module contains the three templates that govern the on-chain life
+-- of a tokenized US Treasury security: the token itself (TokenizedBond),
+-- proof of coupon distribution (CouponPaymentRecord), and the co-signed
+-- redemption workflow (RedemptionRequest).
+--
+-- Real-world analogy: in the traditional market, a broker/dealer holds a
+-- DTC "book entry" position and the investor holds a brokerage account
+-- claim. Here, that claim is made explicit on-ledger as a TokenizedBond
+-- contract — visible to the investor and the regulator, transferable only
+-- with both investor consent and bank co-authorization.
+--
+-- This module directly implements the token layer of institutional Treasury
+-- tokenization: Canton ledger replaces the broker/dealer position record;
+-- CustodyRecord (in AssetCustody.daml) replaces the DTC immobilization.
 module RWA.TokenizedBond where
 
 import RWA.Types
 
 -- ============================================================
--- Tokenized Bond — The Core On-Chain Token
+-- TokenizedBond — The Core On-Chain Token
 -- ============================================================
 --
--- Represents an investor's ownership of a tokenized US Treasury security.
--- The bank holds the underlying bond in its DTC account and issues tokens
--- on a 1:1 basis. One TokenizedBond contract per investor per CUSIP position.
+-- This contract represents an investor's legal ownership claim on a
+-- specific quantity of a US Treasury security held in DTC custody.
+-- One contract per investor per CUSIP position; split positions produce
+-- two contracts (see SplitTransfer choice).
 --
--- Party model:
---   escrowBank    — sole signatory (bank is the qualified custodian and
---                   token issuer; self-attests the backing position)
---   currentOwner  — observer + co-controller on transfer/redemption choices
---                   (investor must consent to any transfer of their position)
+-- Signatories:
+--   escrowBank — sole signatory. The bank is the qualified custodian,
+--                the token issuer, and the compliance gatekeeper. It
+--                self-attests the underlying DTC position. Only the bank
+--                can create, update, or burn this token — no investor can
+--                mint tokens for themselves.
 --
--- Trust anchors (how the 1:1 backing is verifiable without a regulator party):
---   1. CustodyRecord.ensure: totalMintedUnits <= quantity (DAML runtime enforced)
---   2. dtcSettlementRef links each token to a specific DTC settlement event
---   3. Bank's Reconciliation Service runs nightly: DTC MT535 position vs on-ledger
---   4. Regulatory reporting generated off-chain and submitted to SEC/OCC
+-- Observers:
+--   currentOwner — the investor who holds the position. Observer status
+--                  means they can see the contract but cannot exercise
+--                  choices unilaterally. Co-controller on Transfer and
+--                  Redeem choices ensures investor consent is required.
+--   regulator    — read-only market surveillance (SEC/OCC). Sees all
+--                  positions across all investors without operational authority.
+--
+-- Compliance:
+--   - Transfer requires BOTH parties (currentOwner + escrowBank), satisfying
+--     the bank's obligation to screen for KYC, OFAC, Reg D holding periods,
+--     and accreditation before co-signing.
+--   - dtcSettlementRef links each token to a specific DTC settlement event,
+--     providing an immutable audit trail (SEC Rule 17a-4 recordkeeping).
+--   - transferHistory append-only list provides full chain-of-custody.
+--   - 1:1 backing invariant enforced atomically with CustodyRecord (see
+--     BurnToken and RecordMinting in purchase/redemption flows).
 
 template TokenizedBond
   with
@@ -109,11 +141,14 @@ template TokenizedBond
           couponAmount
           paymentRef
 
-    -- Investor initiates redemption at or after maturity.
-    -- The bank's Redemption Service detects this event and processes
-    -- the DTC maturity / early redemption off-chain, then exercises
-    -- ApproveRedemption + BurnToken in an atomic DAML transaction.
-    choice InitiateRedemption : ContractId RedemptionRequest
+    -- Investor signals intent to redeem at or after maturity.
+    -- NONCONSUMING: the bond stays alive while redemption is in flight so
+    -- the bank can exercise BurnToken in the same atomic transaction as
+    -- ApproveRedemption + CustodyRecord.RecordRedemption.
+    -- (A consuming choice here would archive the bond immediately, making
+    -- the separate BurnToken step impossible and violating the atomicity
+    -- guarantee of the three-step redemption settlement.)
+    nonconsuming choice InitiateRedemption : ContractId RedemptionRequest
       controller currentOwner
       do
         create RedemptionRequest with
@@ -135,12 +170,33 @@ template TokenizedBond
 
 
 -- ============================================================
--- Coupon Payment Record — Immutable Proof of Coupon Distribution
+-- CouponPaymentRecord — Immutable On-Chain Proof of Coupon Distribution
 -- ============================================================
 --
--- Created by the bank's Coupon Service after each coupon cycle.
--- The investor can verify their payment history on-chain.
--- Off-chain, the bank submits coupon data to EDGAR and FinCEN.
+-- This contract represents a single coupon payment made to a token holder
+-- for a specific payment date. US Treasury T-Notes pay semiannually;
+-- T-Bills are zero-coupon. Each payment creates a new, immutable record.
+--
+-- Signatories:
+--   escrowBank — sole signatory. The bank receives coupon proceeds from
+--                DTC (via corporate action MT564 notification) and distributes
+--                to investors via ACH or Fedwire. The bank's signature on
+--                this record attests that payment was actually made.
+--
+-- Observers:
+--   investor  — the token holder who received the payment. Can verify their
+--               full payment history by querying all CouponPaymentRecord
+--               contracts where they are the investor.
+--   regulator — income surveillance. Regulators cross-check coupon payment
+--               data against the bank's 1099 / EDGAR filings.
+--
+-- Compliance:
+--   - paymentRef (ACH trace number or Fedwire IMAD) provides a reconcilable
+--     reference to the actual cash payment in the fiat payment system.
+--   - nonconsuming choice on TokenizedBond means bond is not disturbed;
+--     this is a side-effect record only.
+--   - Created by the bank's Coupon Service after each coupon cycle.
+--   Off-chain, the bank submits coupon data to EDGAR and FinCEN.
 
 template CouponPaymentRecord
   with
@@ -162,13 +218,35 @@ template CouponPaymentRecord
 
 
 -- ============================================================
--- Redemption Request — Investor Initiates Bond Redemption
+-- RedemptionRequest — Co-Signed Bond Redemption Workflow
 -- ============================================================
 --
--- Created from TokenizedBond.InitiateRedemption.
--- The bank's Redemption Service processes DTC maturity/early redemption
--- off-chain, receives Fedwire principal proceeds, pays the investor via
--- ACH/Fedwire, then composes ApproveRedemption + BurnToken atomically.
+-- This contract represents a formal request by an investor to redeem their
+-- tokenized bond position back to fiat currency. Redemption corresponds
+-- to the bond reaching maturity (DTC sends MT502/MT515 maturity notice)
+-- or early redemption if the bond has a call feature.
+--
+-- Signatories:
+--   escrowBank — must co-sign because redemption triggers off-chain DTC
+--                maturity processing, Fedwire principal proceeds receipt,
+--                and investor payment via ACH/Fedwire. The bank controls
+--                the entire settlement workflow.
+--   investor   — must initiate (InitiateRedemption controller: currentOwner)
+--                because only the investor can authorize surrender of their
+--                position. This prevents the bank from forcing redemptions.
+--
+-- Observers:
+--   regulator — witnesses redemption events for market surveillance.
+--               Regulators track bond supply reduction and verify that
+--               redeemed tokens correspond to actual DTC maturity events.
+--
+-- Compliance:
+--   - The atomic composition (ApproveRedemption + BurnToken +
+--     CustodyRecord.RecordRedemption in a single DAML transaction) ensures
+--     no token outlives the underlying bond position — a direct implementation
+--     of the 1:1 backing invariant required by qualified custodian rules.
+--   - paymentRef (Fedwire IMAD) in ApproveRedemption provides a verifiable
+--     link to the actual principal payment, satisfying Rule 17a-4.
 
 template RedemptionRequest
   with

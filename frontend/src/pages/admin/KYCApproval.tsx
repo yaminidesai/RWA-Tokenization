@@ -1,3 +1,32 @@
+/**
+ * KYCApproval — Bank Compliance Officer's Identity Verification Review
+ *
+ * This page is the human-in-the-loop control point between automated
+ * identity verification (Jumio + OFAC screening) and on-ledger KYC approval.
+ * In a production system, this would be the compliance officer's workstation.
+ *
+ * The workflow:
+ *   1. Automated verification runs after investor registration (KYC Service)
+ *   2. If Jumio + OFAC pass, the investor appears here with status 'pending_approval'
+ *   3. Compliance officer reviews the Jumio reference (links to primary evidence)
+ *      and OFAC reference, then approves or rejects
+ *
+ * On "Approve":
+ *   POST /api/admin/kyc/:investorId/approve
+ *   → kycService.approveKYC()
+ *   → ledger.exercise(InvestorKYC, ApproveKYC, bank)  [asserts status == KYCPending]
+ *   → DAML creates new InvestorKYC with status = KYCApproved
+ *   The investor can now purchase bonds and receive transfers.
+ *
+ * On "Reject":
+ *   POST /api/admin/kyc/:investorId/reject  (reason required)
+ *   → kycService.rejectKYC()
+ *   The rejection reason is stored in PostgreSQL and surfaced to the investor
+ *   on their Dashboard. Adverse action notification is the bank's compliance obligation.
+ *
+ * Displayed fields: Jumio reference (links to off-chain ID check), OFAC reference
+ * (links to sanctions screening record), expiry date (annual renewal requirement).
+ */
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import AdminLayout from '../../components/AdminLayout'
 import { adminApi } from '../../api/client'

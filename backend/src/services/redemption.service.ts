@@ -1,3 +1,31 @@
+// Redemption Service — irreversible bond maturity and principal return workflow.
+//
+// This service implements the most operationally sensitive flow in the platform:
+// converting a live TokenizedBond into a settled cash payment and archived token.
+// Because redemption involves real money movement (Fedwire) before Canton state
+// changes, the sequencing and idempotency design are critical.
+//
+// Settlement-first pattern (DTC/Fedwire before Canton):
+// approveRedemption runs off-chain settlement FIRST (DTC maturity redemption,
+// then Fedwire principal payout to the investor), persists the payment reference
+// to PostgreSQL, and ONLY THEN submits the atomic Canton batch. If Canton fails
+// due to a transient network error, the saved payment_ref (Fedwire IMAD) allows
+// the operator to re-run the Canton batch only, without re-settling at DTC.
+// The deterministic commandId (`redeem-<redemptionRequestId>`) ensures Canton
+// deduplicates the retry and returns the original result.
+//
+// DAML contract mapping:
+//   initiateRedemption → ledger.exercise(TokenizedBond, InitiateRedemption)
+//     [nonconsuming — bond stays alive; creates RedemptionRequest co-signed by bank + investor]
+//   approveRedemption  → ledger.submitBatch([
+//       exercise(RedemptionRequest, ApproveRedemption),  // validates amount > 0, ref present
+//       exercise(TokenizedBond,     BurnToken),           // archives the investor's token
+//       exercise(CustodyRecord,     RecordRedemption)     // decrements quantity + minted units
+//     ])  — all three in a single Canton transaction
+//
+// The three-way atomic batch mirrors the guarantee required by institutional settlement
+// finality standard: there must be no intermediate state where the investor's
+// token is burned but the custody record still shows it as outstanding, or vice versa.
 import { db } from '../db/client'
 import { ledger, TEMPLATE_IDS } from '../ledger/client'
 import { config } from '../config'

@@ -1,31 +1,66 @@
+-- ============================================================
+-- RWA.EscrowRequest — Two-Leg Purchase Settlement Workflow
+-- ============================================================
+--
+-- This module implements the purchase and token minting workflow as a
+-- three-stage state machine: EscrowRequest → ApprovedPurchase → [minted].
+-- The design explicitly models the "two legs" of a traditional securities
+-- transaction: the asset leg (DTC settlement of the bond) and the cash leg
+-- (investor payment via ACH/Fedwire). Both legs must complete before the
+-- token is created.
+--
+-- Why two stages before minting? Because real bond purchases are not
+-- instantaneous. After the bank approves an investor's request, it must
+-- buy the actual Treasury bond from a primary dealer and wait for DTC
+-- settlement (which occurs on T+1 under current rules, moving to T+0
+-- under ongoing settlement modernization initiatives). ApprovedPurchase is the
+-- on-ledger representation of this pending state.
+--
+-- The critical design point: the Minting Service composes
+--   ConfirmCustodyAndMint + RecordMinting + TokenizedBond creation
+-- in a SINGLE DAML transaction. This atomicity is what eliminates the
+-- settlement risk that exists in the traditional T+1 world — there is
+-- no moment in which the investor is exposed to a token without backing.
+--
+-- RejectedRequest is an immutable audit record (archived contract) that
+-- serves as evidence for regulatory reporting and investor dispute resolution.
 module RWA.EscrowRequest where
 
 import RWA.Types
 
 -- ============================================================
--- Escrow Request — Investor Purchase Request Workflow
+-- EscrowRequest — Investor's Co-Signed Purchase Intent
 -- ============================================================
 --
--- Party model:
---   escrowBank — signatory (authorises and processes the request)
---   investor   — signatory (expresses and owns the purchase intent)
+-- This contract represents an investor's formal request to purchase a
+-- specific quantity of a tokenized bond at or below a stated price.
+-- Both parties co-sign at creation, establishing mutual commitment before
+-- any off-chain bond purchase activity begins.
 --
--- No regulator party. Regulatory audit trail is generated off-chain by
--- the bank's Reporting Service from ledger event streams.
+-- Signatories:
+--   escrowBank — co-signs at creation to acknowledge the request and
+--                commit to processing it. The bank's signature means it
+--                has already verified investor KYC off-chain and confirmed
+--                bond availability before submitting to the ledger.
+--   investor   — co-signs to express binding purchase intent. This prevents
+--                an investor from later claiming they did not authorize the
+--                purchase. The investor's Canton party ID (not just their
+--                email) must be a ledger signatory.
 --
--- Lifecycle:
---   1. Investor submits purchase request via the Investor Portal
---   2. Bank's API Gateway co-signs and creates EscrowRequest on-ledger
---   3. Bank verifies investor KYC off-chain (lookupByKey on InvestorKYC)
---   4. Bank exercises ApproveRequest → ApprovedPurchase
---      OR RejectRequest → RejectedRequest
---   5. Bank's Custody Service detects ApprovedPurchase via ledger stream,
---      purchases the underlying bond via primary dealer (SWIFT MT541 → DTC)
---   6. After DTC settlement confirmation (MT545), Minting Service composes
---      a single DAML transaction:
---        a. Exercise ConfirmCustodyAndMint on ApprovedPurchase (archives it)
---        b. Exercise RecordMinting on CustodyRecord (updates minted count)
---        c. Create TokenizedBond (investor sees their token)
+-- Observers:
+--   regulator — visibility into the purchase pipeline for market
+--               surveillance. Regulators can see pending, approved, and
+--               rejected requests to monitor for suspicious activity.
+--
+-- Compliance:
+--   - maxPurchasePrice is the investor's price ceiling; ConfirmCustodyAndMint
+--     (on the downstream ApprovedPurchase) asserts actualPrice <= max.
+--     This provides best-execution protections (MiFID II / SEC Rule 10b-10).
+--   - investorAccountRef ties the purchase to a specific bank account,
+--     providing the cash-leg reference needed for ACH/Fedwire settlement.
+--   - The two-signatory design creates a dual-control record that protects
+--     both the bank (investor cannot deny authorizing the purchase) and the
+--     investor (bank cannot process a purchase the investor didn't request).
 
 template EscrowRequest
   with
@@ -82,9 +117,35 @@ template EscrowRequest
       do pure ()
 
 
--- Intermediate state: bank approved, awaiting off-chain DTC settlement.
--- The bank's Custody Service streams the ledger for ApprovedPurchase events
--- and initiates the bond purchase (SWIFT MT541 to primary dealer / DTC).
+-- ============================================================
+-- ApprovedPurchase — Asset Leg Pending DTC Settlement
+-- ============================================================
+--
+-- This contract represents the intermediate state between bank approval
+-- and token minting. It signals to the bank's off-chain Custody Service
+-- that it should now acquire the underlying bond from a primary dealer
+-- via SWIFT MT541 → DTC. The contract persists until DTC settlement
+-- confirmation (MT545) arrives, at which point it is archived atomically
+-- with TokenizedBond creation.
+--
+-- Signatories:
+--   escrowBank — committed to completing the bond acquisition. Once this
+--                contract exists, the bank has approved the purchase and
+--                must either complete it (ConfirmCustodyAndMint) or provide
+--                a documented reason for cancellation (CancelApprovedPurchase).
+--   investor   — maintains co-signatory status through the pending state,
+--                ensuring the investor's authorization carries forward.
+--
+-- Observers:
+--   regulator — sees all approved purchases in the settlement pipeline.
+--
+-- Compliance:
+--   - ConfirmCustodyAndMint enforces actualPrice <= approvedMaxPrice,
+--     binding the bank to the investor's price ceiling even after the
+--     off-chain bond purchase occurs at market prices.
+--   - CancelApprovedPurchase with a documented reason satisfies the bank's
+--     obligation to notify investors when a purchase cannot be completed
+--     (e.g., bond unavailable from primary dealer at the agreed price).
 template ApprovedPurchase
   with
     investor           : Party
@@ -135,7 +196,37 @@ template ApprovedPurchase
           rejectionDate   = approvalDate
 
 
--- Immutable audit record of a rejected or cancelled request.
+-- ============================================================
+-- RejectedRequest — Immutable Audit Record of Failed Transactions
+-- ============================================================
+--
+-- This contract represents a purchase request that was denied or cancelled,
+-- preserved permanently on the ledger as an audit record. Real-world
+-- scenarios that create a RejectedRequest:
+--   - Investor KYC expired or revoked (compliance failure)
+--   - Bond unavailable from primary dealer at the investor's price ceiling
+--   - Accreditation level insufficient for this bond's RegExemption
+--   - OFAC re-screening triggered during the approval window
+--   - Investor cancelled before bank processing completed
+--
+-- Signatories:
+--   escrowBank — records the bank's formal rejection decision.
+--   investor   — co-signatory because this is a record of their request.
+--                Both parties are on record as knowing about the rejection.
+--
+-- Observers:
+--   regulator — sees all rejection records. Regulators monitor rejection
+--               patterns to detect potential discriminatory denial practices
+--               (Fair Credit Reporting Act, FINRA suitability rules).
+--
+-- Compliance:
+--   - rejectionReason is required (enforced by assertMsg) and must be
+--     non-empty. This satisfies the bank's obligation to provide investors
+--     with a documented reason for denial (adverse action notification
+--     under the Equal Credit Opportunity Act and similar standards).
+--   - The immutable nature of this record (it cannot be modified or
+--     deleted after creation) satisfies SEC Rule 17a-4 requirements for
+--     immutable recordkeeping of securities-related communications.
 template RejectedRequest
   with
     investor        : Party

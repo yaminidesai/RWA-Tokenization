@@ -1,4 +1,33 @@
-// KYC Service — manages investor identity verification and onboarding.
+// KYC Service — investor identity verification and Canton party onboarding.
+//
+// This service bridges three systems: the PostgreSQL investor database,
+// the Canton ledger (for on-ledger KYCInvitation and InvestorKYC contracts),
+// and the off-chain identity verification providers (Jumio, OFAC API).
+//
+// Why allocate a Canton party for every investor?
+// Canton's privacy model requires that every party who appears as an observer
+// or controller in a DAML contract must be a real allocated Canton party with
+// a cryptographic key. A string "investor@email.com" is not a Canton party.
+// allocateParty() calls the Canton Admin API to generate a Party ID (e.g.
+// "Investor-AliceSmith::122059...") that is used in all subsequent DAML contracts.
+//
+// On-ledger vs. off-chain state:
+// PostgreSQL is the source of truth for the admin portal (fast queries, no Canton
+// API round-trips). The Canton ledger is the source of truth for authorization
+// (which party can exercise which choice). Both are kept in sync: Canton events
+// are projected into PostgreSQL, and all Canton interactions are reflected back.
+//
+// Compliance flow:
+//   1. Investor registers → Canton party allocated → KYCInvitation created on ledger
+//   2. Jumio identity check + OFAC sanctions screening run asynchronously
+//   3. If cleared: InvestorKYC contract created on ledger (status = KYCPending)
+//   4. Bank admin reviews Jumio/OFAC references in the admin portal and approves
+//   5. approveKYC exercises InvestorKYC.ApproveKYC → status = KYCApproved on ledger
+//   After step 5, the investor can submit purchase requests and receive transfers.
+//
+// Regulatory note: the kycProviderRef stored in InvestorKYC links the on-ledger
+// compliance record to the off-chain Jumio record where the primary evidence
+// (ID documents, liveness check, OFAC match results) is retained.
 //
 // Flow:
 //   1. Investor registers → KYC record created with status 'registered'

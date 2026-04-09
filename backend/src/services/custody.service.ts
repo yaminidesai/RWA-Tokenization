@@ -1,4 +1,26 @@
-// Custody Service — manages the bank's on-chain attestation of DTC bond holdings.
+// Custody Service — dual-record management of DTC bond holdings.
+//
+// Every bond position in this system exists in two places simultaneously:
+//   1. On the Canton ledger as a CustodyRecord contract (the authoritative source
+//      for the 1:1 backing invariant, visible to the regulator observer)
+//   2. In PostgreSQL as a custody_records row (the fast-query projection used by
+//      the admin portal and purchase availability checks)
+//
+// createCustodyRecord keeps both in sync atomically: it creates the Canton contract
+// first, captures the contract ID in the response, then inserts the PostgreSQL row
+// with that contract ID. This contract ID is what the purchase and redemption services
+// use when exercising RecordMinting and RecordRedemption on the Canton ledger.
+//
+// The two locking methods (updateMintedUnitsAndContract, decrementMintedUnitsAndContract)
+// use SELECT FOR UPDATE to serialize concurrent reads. This is a second line of defense
+// behind the DAML ensure clause — even if two purchase requests pass the availability
+// check simultaneously, only one can hold the row lock and increment minted_units.
+// The other will see the updated quantity and fail if units would be exceeded.
+//
+// available_units is a computed column (quantity - total_minted_units) derived at
+// query time. It is not stored separately to avoid update anomalies — the single
+// source of truth is the total_minted_units field updated by the locking methods.
+//
 // The bank buys real bonds at DTC and creates CustodyRecords on Canton as self-attestation.
 
 import { db } from '../db/client'

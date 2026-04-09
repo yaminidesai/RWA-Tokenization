@@ -1,3 +1,22 @@
+/**
+ * Dashboard — Investor Portal Home Screen
+ *
+ * Shows the investor's KYC status, portfolio summary, and recent holdings.
+ * This is the first screen an investor sees after login. The KYC status
+ * banner is critical: investors cannot purchase or receive bonds until KYC
+ * is approved, and this page makes that state visible and actionable.
+ *
+ * Data sources (all via React Query → REST → DAML ledger projection):
+ *   GET /api/investor/kyc      → InvestorKYC contract status for this investor
+ *   GET /api/investor/holdings → TokenizedBond contracts where currentOwner = investor
+ *   GET /api/investor/coupons  → CouponPaymentRecord contracts for this investor
+ *
+ * KYC status flow displayed to investor:
+ *   registered → invited → accepted (verifying) → pending_approval → approved/rejected
+ * This mirrors the InvestorKYC lifecycle on Canton: KYCInvitation → InvestorKYC(Pending)
+ * → InvestorKYC(Approved). The status labels are human-readable translations of the
+ * on-ledger DAML enum values (KYCPending, KYCApproved, etc.).
+ */
 import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import Layout from '../components/Layout'

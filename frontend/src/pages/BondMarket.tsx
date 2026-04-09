@@ -1,3 +1,25 @@
+/**
+ * BondMarket — Available Treasury Bonds for Purchase
+ *
+ * Displays all CustodyRecords that have available units (quantity > totalMintedUnits).
+ * When an investor submits a buy request, this page calls:
+ *   POST /api/investor/purchases → purchaseService.submitPurchaseRequest()
+ *   → ledger.create(EscrowRequest, [bank, investor])
+ *
+ * The maxPurchasePrice field the investor enters here becomes the binding price
+ * ceiling encoded in the EscrowRequest contract on Canton. The off-chain purchase
+ * service (purchaseService.executeDTCPurchaseAndMint) will later exercise
+ * ConfirmCustodyAndMint with the actual DTC settlement price, and the DAML choice
+ * asserts actualPrice <= approvedMaxPrice — so this UI field has real on-ledger
+ * enforcement, not just advisory validation.
+ *
+ * The investor must have approved KYC before submitting. If KYC is not approved,
+ * the backend returns a 400 error ("KYC must be approved before purchasing bonds")
+ * which is surfaced to the investor in the error banner.
+ *
+ * Data: GET /api/bonds → custodyService.listAvailableBonds() (PostgreSQL projection,
+ * updated by ledger event stream from CustodyRecord creates/updates).
+ */
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import Layout from '../components/Layout'

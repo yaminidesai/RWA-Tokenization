@@ -1,3 +1,35 @@
+/**
+ * AdminDashboard — Bank Operations Center
+ *
+ * The primary workflow console for the bank's operations team. Every action
+ * on this page maps to a DAML choice exercise on the Canton ledger:
+ *
+ * Pending Purchases (EscrowRequest → ApprovedPurchase → TokenizedBond):
+ *   Approve → POST /api/admin/purchases/:id/approve
+ *     → purchaseService.approvePurchaseRequest()
+ *     → ledger.exercise(EscrowRequest, ApproveRequest)  [creates ApprovedPurchase]
+ *     → purchaseService.executeDTCPurchaseAndMint() runs async:
+ *         ledger.submitBatch([ConfirmCustodyAndMint, RecordMinting, create TokenizedBond])
+ *   Reject  → POST /api/admin/purchases/:id/reject  (reason required)
+ *     → ledger.exercise(EscrowRequest, RejectRequest)  [creates RejectedRequest]
+ *
+ * Pending Redemptions (RedemptionRequest → BurnToken + RecordRedemption):
+ *   Approve & Pay → POST /api/admin/redemptions/:id/approve  (accountRef required)
+ *     → redemptionService.approveRedemption()
+ *     → ledger.exercise(RedemptionRequest, ApproveRedemption)
+ *     → ledger.exercise(TokenizedBond, BurnToken)
+ *     → ledger.exercise(CustodyRecord, RecordRedemption)  [all three atomic]
+ *
+ * Coupon Distribution (creates CouponPaymentRecord per holder):
+ *   → POST /api/admin/coupons/distribute
+ *     → couponService.distributeCoupon(cusip, couponDate, rate)
+ *     → for each holder: ledger.exercise(TokenizedBond, RecordCouponPayment) [nonconsuming]
+ *     Bank triggers this after receiving DTC MT564 corporate action notification
+ *     confirming coupon proceeds have been received from the US Treasury.
+ *
+ * Stats panel pulls from PostgreSQL (not Canton) for performance — the ledger
+ * event stream keeps the DB in sync with on-ledger contract state.
+ */
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import AdminLayout from '../../components/AdminLayout'

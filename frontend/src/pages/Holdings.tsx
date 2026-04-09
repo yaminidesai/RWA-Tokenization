@@ -1,3 +1,27 @@
+/**
+ * Holdings — Investor's Active TokenizedBond Positions
+ *
+ * Shows all TokenizedBond contracts where the investor is the currentOwner,
+ * along with their coupon payment history and the redemption workflow.
+ *
+ * The Redeem button triggers:
+ *   POST /api/investor/holdings/:id/redeem
+ *   → redemptionService.initiateRedemption()
+ *   → ledger.exercise(TokenizedBond, InitiateRedemption)
+ *   → creates RedemptionRequest on Canton (co-signed by bank + investor)
+ *
+ * Two-step confirmation UX (Redeem → Confirm) is intentional: once the bank
+ * approves, redemption is irreversible. InitiateRedemption is nonconsuming —
+ * the TokenizedBond stays live until the bank exercises BurnToken atomically
+ * with ApproveRedemption + CustodyRecord.RecordRedemption. The investor cannot
+ * cancel after initiation; only the bank can reject (e.g. bond not yet matured).
+ *
+ * Transfer navigation links to /transfer/:holdingId (Transfer.tsx) where the
+ * investor can exercise TransferOwnership or SplitTransfer on Canton.
+ *
+ * Data: GET /api/investor/holdings  → TokenizedBond projections per investor
+ *       GET /api/investor/coupons   → CouponPaymentRecord projections per investor
+ */
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import Layout from '../components/Layout'

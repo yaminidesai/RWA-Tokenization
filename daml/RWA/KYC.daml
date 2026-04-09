@@ -1,25 +1,65 @@
+-- ============================================================
+-- RWA.KYC — Investor Identity Verification and Onboarding
+-- ============================================================
+--
+-- This module implements the two-step KYC onboarding workflow required
+-- before an investor can purchase or receive tokenized Treasury bonds.
+-- Step 1 (KYCInvitation): bank signals to the investor that onboarding
+-- has been initiated, triggering off-chain identity verification.
+-- Step 2 (InvestorKYC): after Jumio/OFAC checks pass, the bank creates
+-- a formal on-ledger compliance certificate for that investor.
+--
+-- In institutional finance, KYC is not optional — it is a regulatory
+-- requirement under the Bank Secrecy Act, FinCEN regulations, and
+-- SEC rules for broker/dealers and transfer agents. Every TokenizedBond
+-- purchase and transfer check for an active, non-expired InvestorKYC
+-- contract before proceeding.
+--
+-- This module also demonstrates Canton's privacy model: each InvestorKYC
+-- contract is visible only to the escrowBank (signatory), that specific
+-- investor (observer), and the regulator (observer). Competing investors
+-- cannot see each other's KYC records — a requirement for confidentiality
+-- in institutional settings.
 module RWA.KYC where
 
 import RWA.Types
 
 -- ============================================================
--- KYC Registry — Investor Whitelisting and Compliance Status
+-- InvestorKYC — On-Ledger KYC/AML Compliance Certificate
 -- ============================================================
 --
--- Party model:
---   escrowBank  — sole signatory; owns the KYC determination
---   investor    — observer; can read their own KYC status
+-- This contract represents the bank's formal determination that a
+-- specific investor has passed identity verification (AML clearance,
+-- OFAC sanctions screening, and SEC accreditation assessment). Without
+-- an active InvestorKYC, the investor cannot purchase bonds and cannot
+-- be the recipient of a transfer.
 --
--- The regulator is NOT a Canton party. Regulatory audit access is
--- provided off-chain by the bank's Reporting Service (exports ledger
--- data to SEC/OCC in required formats).
+-- Signatories:
+--   escrowBank — sole signatory. KYC is the bank's regulatory determination
+--                under the Bank Secrecy Act and FinCEN rules. The investor
+--                does not "agree" to their own KYC — the bank certifies it
+--                based on off-chain identity checks (Jumio, OFAC API, etc.).
+--                This is why escrowBank is the ONLY signatory, not investor.
 --
--- All investor parties are allocated on the bank's single participant
--- node. There is no separate participant node for regulators or investors.
-
--- KYC/AML compliance certificate issued and maintained by the bank.
--- Required before any issuance request can be submitted or transfer accepted.
--- Contract key allows deterministic lookup by (escrowBank, investor) pair.
+-- Observers:
+--   investor  — sees their own KYC status and expiry date. The investor
+--               portal uses this to show the investor their verification
+--               status and alert them before expiry.
+--   regulator — compliance oversight. Regulators can see all KYC records
+--               to verify the bank is properly screening investors before
+--               allowing participation in the bond market.
+--
+-- Compliance:
+--   - amlCleared and sanctionsCleared fields enforced in the ensure clause:
+--     a contract with amlCleared = False cannot exist. This prevents the
+--     bank from accidentally creating KYC records for non-cleared investors.
+--   - kycProviderRef links to the off-chain Jumio/Onfido verification record,
+--     providing an audit trail to the primary evidence.
+--   - expiryDate and lastScreeningDate support periodic re-screening
+--     requirements (FinCEN rules require ongoing monitoring, not just
+--     one-time onboarding). RenewKYC choice extends both fields.
+--   - accreditation and isAccredited support Reg D / Rule 144A eligibility
+--     checking: Retail investors cannot purchase bonds with QIBOnly exemption.
 template InvestorKYC
   with
     investor          : Party
@@ -94,15 +134,37 @@ template InvestorKYC
 
 
 -- ============================================================
--- KYC Invitation — Bank Initiates Investor Onboarding
+-- KYCInvitation — Bank Initiates Investor Onboarding
 -- ============================================================
 --
--- The bank creates a KYCInvitation after the investor registers on
--- the Investor Portal. The investor's party has already been allocated
--- on the bank's participant node by the onboarding service via Admin API.
--- The investor accepts the invitation, triggering the off-chain KYC
--- verification flow (Jumio/Onfido identity check + OFAC screening).
--- After verification, the bank's KYC Service creates the InvestorKYC record.
+-- This contract represents the bank's formal invitation to an investor
+-- to begin the KYC/AML onboarding process. In traditional finance, this
+-- corresponds to the account opening agreement a broker/dealer sends to
+-- a prospective client before conducting identity verification.
+--
+-- Signatories:
+--   escrowBank — sole signatory. The bank creates this contract after
+--                allocating a Canton party ID for the investor via the
+--                Admin API. The bank controls when onboarding is initiated;
+--                investors cannot self-onboard without the bank's action.
+--
+-- Observers:
+--   investor  — the invited party. Their AcceptKYCInvitation choice
+--               triggers the off-chain KYC verification workflow (Jumio
+--               identity check + OFAC sanctions screening). This co-
+--               authorization pattern means both parties are on record as
+--               having agreed to begin the verification process.
+--   regulator — visibility into the onboarding pipeline. Regulators can
+--               see how many investors are in-flight through onboarding,
+--               which matters for AML program oversight.
+--
+-- Compliance:
+--   - Two-step design (Invitation + InvestorKYC) mirrors how real-world
+--     KYC programs work: there is a pre-qualification stage (invitation
+--     accepted) and a formal determination stage (KYC approved).
+--   - The WithdrawKYCInvitation choice allows the bank to cancel onboarding
+--     before verification completes — e.g., if the investor appears on a
+--     sanctions list during initial screening before full Jumio verification.
 
 template KYCInvitation
   with

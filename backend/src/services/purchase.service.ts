@@ -1,4 +1,32 @@
-// Purchase Service — handles the full bond purchase and token minting workflow.
+// Purchase Service — full bond acquisition and atomic token minting workflow.
+//
+// This service implements the most complex flow in the platform: converting
+// investor intent (EscrowRequest) into a backed TokenizedBond via real-world
+// DTC settlement simulation. Every step maps directly to a DAML choice or
+// contract creation on the Canton ledger.
+//
+// DAML contract mapping:
+//   submitPurchaseRequest  → ledger.create(EscrowRequest, [bank, investor])
+//   approvePurchaseRequest → ledger.exercise(EscrowRequest, ApproveRequest)
+//   executeDTCPurchaseAndMint:
+//     Step 1: purchaseBondsAtDTC() → mock SWIFT MT541 → DTC settlement (MT545)
+//     Step 2: ledger.submitBatch([
+//               exercise(ApprovedPurchase, ConfirmCustodyAndMint),  // validate price
+//               exercise(CustodyRecord,    RecordMinting),          // enforce 1:1 backing
+//               create(TokenizedBond)                               // mint the token
+//             ]) — all three in a SINGLE Canton transaction
+//
+// Why submitBatch for the mint?
+// The 1:1 backing invariant requires that RecordMinting and TokenizedBond
+// creation are atomic. If they were separate transactions, there would be a
+// window in which a TokenizedBond exists before the CustodyRecord reflects
+// it — or vice versa. submitBatch submits all three commands as one Canton
+// transaction, which Canton either fully applies or fully rejects.
+//
+// Deterministic commandId (mint-<purchaseRequestId>):
+// If the batch fails due to a transient network error and is retried, Canton
+// deduplicates by commandId and returns the original result rather than
+// minting twice. This is critical for idempotent retry logic.
 //
 // Flow:
 //   1. Investor submits purchase request → EscrowRequest created on Canton
