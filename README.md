@@ -6,13 +6,19 @@
 
 ## Overview
 
-This platform implements the complete lifecycle of a tokenized US Treasury security on Canton Network: investor onboarding with KYC/AML clearance, DTC custody attestation, atomic token minting at 1:1 backing, peer-to-peer transfer with compliance gating, semiannual coupon distribution, and final principal redemption. A qualified custodian (the escrow bank) holds real Treasuries in its DTC participant account, creates an on-ledger `CustodyRecord` as self-attestation of that position, and mints `TokenizedBond` tokens strictly against that custody. The regulator receives read-only observer visibility into every holding, KYC record, and custody position — full market surveillance capability without being a transacting party.
+This platform implements the complete lifecycle of a tokenized US Treasury security on Canton Network:
 
-The codebase demonstrates that DAML is not merely a smart-contract language but a formal authorization framework. The 9 DAML templates encode who can authorize what, who can see what, and what invariants must hold — in a way that is machine-checked at every transaction submission.
+- **Investor onboarding** — KYC/AML clearance with accreditation gating (Retail / Accredited / QP / QIB)
+- **Custody attestation** — escrow bank creates an on-ledger `CustodyRecord` as self-attestation of its DTC position
+- **Atomic minting** — `TokenizedBond` tokens are minted strictly 1:1 against that custody; the DAML runtime enforces the invariant
+- **Compliant transfer** — peer-to-peer transfers require both investor consent and bank co-authorization (KYC, OFAC, Reg D)
+- **Income and redemption** — semiannual coupon distribution and final principal redemption with on-chain audit records
+
+DAML is not merely a smart-contract language here — it is a formal authorization framework. The 9 templates encode who can authorize what, who can observe what, and what invariants must hold, machine-checked at every transaction submission.
 
 ---
 
-## Why Institutional Finance Needs This
+## The Settlement Problem This Solves
 
 Current US Treasury settlement runs on T+1, routing through at least three separate ledgers: the issuer (TreasuryDirect / Fedwire Securities), the central securities depository (DTC), and broker/dealer position records. Nightly reconciliation across these systems costs the industry billions annually and introduces fail risk estimated at 2–3% of daily settlement volume.
 
@@ -32,7 +38,7 @@ Nine templates across four modules implement the full workflow:
 ### `RWA.AssetCustody` — DTC Position Attestation
 
 | Template | Signatories | Observers | Purpose |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `CustodyRecord` | `escrowBank` | `regulator` | On-ledger attestation of bonds held in DTC account; enforces `totalMintedUnits ≤ quantity` invariant at the protocol level |
 
 The `ensure` clause on `CustodyRecord` is the core of 1:1 backing: `totalMintedUnits <= quantity` is enforced by the DAML runtime on every contract creation and update — not by application logic that could be bypassed.
@@ -40,7 +46,7 @@ The `ensure` clause on `CustodyRecord` is the core of 1:1 backing: `totalMintedU
 ### `RWA.KYC` — Investor Onboarding and Compliance Status
 
 | Template | Signatories | Observers | Purpose |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `KYCInvitation` | `escrowBank` | `investor`, `regulator` | Bank initiates onboarding after investor registers on the portal; investor acceptance triggers off-chain Jumio/Onfido identity verification |
 | `InvestorKYC` | `escrowBank` | `investor`, `regulator` | Active KYC certificate — records AML clearance, OFAC screening, accreditation level (Retail/Accredited/QP/QIB), expiry date, and Jumio provider reference |
 
@@ -49,7 +55,7 @@ The bank is the sole signatory on `InvestorKYC` because KYC is the bank's regula
 ### `RWA.EscrowRequest` — Two-Leg Purchase Settlement
 
 | Template | Signatories | Observers | Purpose |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `EscrowRequest` | `escrowBank`, `investor` | `regulator` | Investor's purchase intent; investor's `maxPurchasePrice` is binding — `ConfirmCustodyAndMint` fails if actual DTC price exceeds it |
 | `ApprovedPurchase` | `escrowBank`, `investor` | `regulator` | Intermediate state: bank approved, awaiting DTC settlement (MT545); triggers off-chain bond purchase via SWIFT MT541 |
 | `RejectedRequest` | `escrowBank`, `investor` | `regulator` | Immutable audit record of any rejected or cancelled request |
@@ -59,7 +65,7 @@ The purchase flow models real delivery-versus-payment (DVP): `ConfirmCustodyAndM
 ### `RWA.TokenizedBond` — The On-Chain Token
 
 | Template | Signatories | Observers | Purpose |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `TokenizedBond` | `escrowBank` | `currentOwner`, `regulator` | Investor's on-ledger ownership position; each token carries `dtcSettlementRef` linking it to the DTC settlement event that created it |
 | `CouponPaymentRecord` | `escrowBank` | `investor`, `regulator` | Immutable on-chain receipt of each coupon payment with ACH trace / Fedwire IMAD reference |
 | `RedemptionRequest` | `escrowBank`, `investor` | `regulator` | Co-signed redemption intent; `ApproveRedemption` + `BurnToken` + `CustodyRecord.RecordRedemption` execute atomically |
@@ -115,7 +121,7 @@ The backend does not implement business logic — it is an orchestration layer. 
 These properties are enforced by the DAML runtime, not by application code that could be misconfigured:
 
 | Control | Where Enforced | Requirement |
-|---|---|---|
+| --- | --- | --- |
 | No token minted without DTC custody backing | `CustodyRecord.ensure: totalMintedUnits ≤ quantity` | Qualified custodian / 1:1 backing |
 | No transfer without bank co-authorization | `TransferOwnership controller: currentOwner, escrowBank` | KYC/OFAC/Reg D compliance gate |
 | No self-transfer | `assertMsg "Cannot transfer to self"` in both transfer choices | Wash trade prevention |
@@ -236,11 +242,11 @@ npm run dev
 # UI running at http://localhost:5173
 ```
 
-### 6. Default credentials
+### 6. Default credentials (demo only)
 
 | Role | Email | Password |
-|---|---|---|
-| Admin | `admin@rwa-platform.com` | `admin123` |
+| --- | --- | --- |
+| Admin | `admin@rwa-platform.com` | set via `ADMIN_PASSWORD` in `.env` |
 | Investor | Register via the UI | — |
 
 ---
@@ -250,7 +256,7 @@ npm run dev
 39 DAML Script tests across 5 test modules verify correctness at the protocol level — independent of the backend or frontend:
 
 | Module | Count | Coverage |
-|---|---|---|
+| --- | --- | --- |
 | `KYCTests` | 8 | Invitation flow, approve, renew, revoke, accreditation upgrade, state-machine guards |
 | `PurchaseTests` | 8 | Full mint + custody update, two-position accumulation, custody increase, reject, cancel, price-limit guard |
 | `RedemptionTests` | 9 | Full atomic redemption, full-custody burn flag, rejection, coupon records (including nonconsuming), guards |
@@ -273,14 +279,14 @@ daml test --test-pattern "Test.PrivacyTests"
 
 ### Auth (`/api/auth`)
 | Method | Endpoint | Description |
-|---|---|---|
+| --- | --- | --- |
 | `POST` | `/register` | Register investor, initiate KYC |
 | `POST` | `/login` | Authenticate, receive HttpOnly JWT cookie |
 | `POST` | `/logout` | Clear session cookie |
 
 ### Investor (`/api/investor`)
 | Method | Endpoint | Description |
-|---|---|---|
+| --- | --- | --- |
 | `GET` | `/kyc` | Get own KYC status |
 | `GET` | `/holdings` | List tokenized bond positions |
 | `GET` | `/purchases` | List purchase requests |
@@ -293,7 +299,7 @@ daml test --test-pattern "Test.PrivacyTests"
 
 ### Admin (`/api/admin`)
 | Method | Endpoint | Description |
-|---|---|---|
+| --- | --- | --- |
 | `GET` | `/stats` | Platform dashboard stats |
 | `GET` | `/investors` | All investors with KYC status |
 | `GET` | `/kyc/pending` | Pending KYC approvals |
@@ -310,7 +316,7 @@ daml test --test-pattern "Test.PrivacyTests"
 
 ### Bonds (`/api/bonds`)
 | Method | Endpoint | Description |
-|---|---|---|
+| --- | --- | --- |
 | `GET` | `/` | Available bonds for purchase |
 | `GET` | `/:id` | Bond detail by ID |
 
@@ -319,7 +325,7 @@ daml test --test-pattern "Test.PrivacyTests"
 ## Technology Stack
 
 | Layer | Technology |
-|---|---|
+| --- | --- |
 | Smart contracts | DAML 3.4.10, target LF 2.1 |
 | Ledger network | Canton Community Edition |
 | Backend | Node.js 20, TypeScript, Express, Zod |
@@ -332,7 +338,7 @@ daml test --test-pattern "Test.PrivacyTests"
 
 ## Industry Context
 
-This project models institutional US Treasury bond tokenization on Canton Network — the workflow major financial institutions are currently building in production for DTC-custodied securities settlement. The core design choices reflect the architecture that matters to institutional participants:
+The core design choices reflect the architecture that matters to institutional participants:
 
 - **Canton Network as settlement layer** — Canton's privacy model allows competing market participants to share a ledger without seeing each other's positions. This codebase demonstrates that model with investor-isolated `TokenizedBond` contracts.
 - **DTC as custodian** — The immobilizing custodian of physical securities holds them in its DTC participant account while tokens circulate on Canton. This codebase models that with `CustodyRecord` (the DTC position) and `TokenizedBond` (the circulating token), kept in sync atomically.
